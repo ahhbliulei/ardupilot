@@ -63,7 +63,7 @@ enum ap_message : uint8_t {
     MSG_GPS2_RTK,
     MSG_SYSTEM_TIME,
     MSG_SERVO_OUT,
-    MSG_NEXT_WAYPOINT,
+    MSG_NEXT_MISSION_REQUEST,
     MSG_NEXT_PARAM,
     MSG_FENCE_STATUS,
     MSG_AHRS,
@@ -124,7 +124,7 @@ public:
     void        send_text(MAV_SEVERITY severity, const char *fmt, ...);
     void        send_textv(MAV_SEVERITY severity, const char *fmt, va_list arg_list);
     void        queued_param_send();
-    void        queued_waypoint_send();
+    void        queued_mission_request_send();
     // packetReceived is called on any successful decode of a mavlink message
     virtual void packetReceived(const mavlink_status_t &status,
                                 mavlink_message_t &msg);

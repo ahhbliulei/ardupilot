@@ -174,7 +174,7 @@ GCS_MAVLINK::setup_uart(const AP_SerialManager& serial_manager, AP_SerialManager
  * handling code
  */
 void
-GCS_MAVLINK::queued_waypoint_send()
+GCS_MAVLINK::queued_mission_request_send()
 {
     if (initialised &&
         waypoint_receiving &&
@@ -637,7 +637,8 @@ void GCS_MAVLINK::handle_mission_write_partial_list(AP_Mission &mission, mavlink
     if ((unsigned)packet.start_index > mission.num_commands() ||
         (unsigned)packet.end_index > mission.num_commands() ||
         packet.end_index < packet.start_index) {
-        send_text(MAV_SEVERITY_WARNING,"Flight plan update rejected");
+        send_text(MAV_SEVERITY_WARNING,"Flight plan update rejected"); // FIXME: Remove this anytime after 2020-01-22
+        mavlink_msg_mission_ack_send(chan, msg->sysid, msg->compid, MAV_MISSION_INVALID_SEQUENCE, MAV_MISSION_TYPE_MISSION);
         return;
     }
 
@@ -850,11 +851,11 @@ bool GCS_MAVLINK::handle_mission_item(mavlink_message_t *msg, AP_Mission &missio
         // only set WP_RADIUS parameter
     } else {
         waypoint_timelast_request = AP_HAL::millis();
-        // if we have enough space, then send the next WP immediately
-        if (HAVE_PAYLOAD_SPACE(chan, MISSION_ITEM)) {
-            queued_waypoint_send();
+        // if we have enough space, then send the next WP request immediately
+        if (HAVE_PAYLOAD_SPACE(chan, MISSION_REQUEST)) {
+            queued_mission_request_send();
         } else {
-            send_message(MSG_NEXT_WAYPOINT);
+            send_message(MSG_NEXT_MISSION_REQUEST);
         }
     }
     return mission_is_complete;
@@ -874,7 +875,7 @@ mission_ack:
 
 ap_message GCS_MAVLINK::mavlink_id_to_ap_message_id(const uint32_t mavlink_id) const
 {
-    // MSG_NEXT_WAYPOINT doesn't correspond to a mavlink message directly.
+    // MSG_NEXT_MISSION_REQUEST doesn't correspond to a mavlink message directly.
     // It is used to request the next waypoint after receiving one.
 
     // MSG_NEXT_PARAM doesn't correspond to a mavlink message directly.
@@ -1583,7 +1584,7 @@ GCS_MAVLINK::update_receive(uint32_t max_time_us)
             gcs().send_text(MAV_SEVERITY_WARNING, "Mission upload timeout");
         } else if (tnow - waypoint_timelast_request > wp_recv_time) {
             waypoint_timelast_request = tnow;
-            send_message(MSG_NEXT_WAYPOINT);
+            send_message(MSG_NEXT_MISSION_REQUEST);
         }
     }
 
@@ -3614,9 +3615,9 @@ bool GCS_MAVLINK::try_send_mission_message(const enum ap_message id)
         mavlink_msg_mission_item_reached_send(chan, mission_item_reached_index);
         ret = true;
         break;
-    case MSG_NEXT_WAYPOINT:
+    case MSG_NEXT_MISSION_REQUEST:
         CHECK_PAYLOAD_SIZE(MISSION_REQUEST);
-        queued_waypoint_send();
+        queued_mission_request_send();
         ret = true;
         break;
     default:
@@ -3737,7 +3738,7 @@ bool GCS_MAVLINK::try_send_message(const enum ap_message id)
 
     case MSG_CURRENT_WAYPOINT:
     case MSG_MISSION_ITEM_REACHED:
-    case MSG_NEXT_WAYPOINT:
+    case MSG_NEXT_MISSION_REQUEST:
         ret = try_send_mission_message(id);
         break;
 

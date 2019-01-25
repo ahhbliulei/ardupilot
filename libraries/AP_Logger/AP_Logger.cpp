@@ -3,39 +3,44 @@
 #include "AP_Logger_Backend.h"
 
 #include "AP_Logger_File.h"
-#include "AP_Logger_File_sd.h"
+#include "AP_Logger_SITL.h"
+#include "AP_Logger_DataFlash.h"
 #include "AP_Logger_MAVLink.h"
 #include <GCS_MAVLink/GCS.h>
-#if CONFIG_HAL_BOARD == HAL_BOARD_F4LIGHT
-#include "AP_Logger_Revo.h"
-#endif
-
 
 AP_Logger *AP_Logger::_instance;
 
 extern const AP_HAL::HAL& hal;
 
-#ifndef HAL_DATAFLASH_FILE_BUFSIZE 
-#define HAL_DATAFLASH_FILE_BUFSIZE  16
+#ifndef HAL_LOGGING_FILE_BUFSIZE
+#define HAL_LOGGING_FILE_BUFSIZE  16
 #endif 
 
-#ifndef HAL_DATAFLASH_MAV_BUFSIZE 
-#define HAL_DATAFLASH_MAV_BUFSIZE  8
+#ifndef HAL_LOGGING_MAV_BUFSIZE
+#define HAL_LOGGING_MAV_BUFSIZE  8
 #endif 
+
+#ifndef HAL_LOGGING_BACKENDS_DEFAULT
+# ifdef HAL_LOGGING_DATAFLASH
+#  define HAL_LOGGING_BACKENDS_DEFAULT DATAFLASH_BACKEND_BLOCK
+# else
+#  define HAL_LOGGING_BACKENDS_DEFAULT DATAFLASH_BACKEND_FILE
+# endif
+#endif
 
 const AP_Param::GroupInfo AP_Logger::var_info[] = {
     // @Param: _BACKEND_TYPE
     // @DisplayName: AP_Logger Backend Storage type
-    // @Description: 0 for None, 1 for File, 2 for dataflash mavlink, 3 for both file and dataflash
-    // @Values: 0:None,1:File,2:MAVLink,3:BothFileAndMAVLink
+    // @Description: Bitmap of what Logger backend types to enable. Block-based logging is available on SITL and boards with dataflash chips. Multiple backends can be selected.
+    // @Bitmask: 0:File,1:MAVLink,2:Block
     // @User: Standard
-    AP_GROUPINFO("_BACKEND_TYPE",  0, AP_Logger, _params.backend_types,       DATAFLASH_BACKEND_FILE),
+    AP_GROUPINFO("_BACKEND_TYPE",  0, AP_Logger, _params.backend_types,       HAL_LOGGING_BACKENDS_DEFAULT),
 
     // @Param: _FILE_BUFSIZE
     // @DisplayName: Maximum AP_Logger File Backend buffer size (in kilobytes)
     // @Description: The AP_Logger_File backend uses a buffer to store data before writing to the block device.  Raising this value may reduce "gaps" in your SD card logging.  This buffer size may be reduced depending on available memory.  PixHawk requires at least 4 kilobytes.  Maximum value available here is 64 kilobytes.
     // @User: Standard
-    AP_GROUPINFO("_FILE_BUFSIZE",  1, AP_Logger, _params.file_bufsize,       HAL_DATAFLASH_FILE_BUFSIZE),
+    AP_GROUPINFO("_FILE_BUFSIZE",  1, AP_Logger, _params.file_bufsize,       HAL_LOGGING_FILE_BUFSIZE),
 
     // @Param: _DISARMED
     // @DisplayName: Enable logging while disarmed
@@ -63,7 +68,7 @@ const AP_Param::GroupInfo AP_Logger::var_info[] = {
     // @Description: Maximum amount of memory to allocate to AP_Logger-over-mavlink
     // @User: Advanced
     // @Units: kB
-    AP_GROUPINFO("_MAV_BUFSIZE",  5, AP_Logger, _params.mav_bufsize,       HAL_DATAFLASH_MAV_BUFSIZE),
+    AP_GROUPINFO("_MAV_BUFSIZE",  5, AP_Logger, _params.mav_bufsize,       HAL_LOGGING_MAV_BUFSIZE),
 
     AP_GROUPEND
 };
@@ -97,8 +102,7 @@ void AP_Logger::Init(const struct LogStructure *structures, uint8_t num_types)
 
 #if defined(HAL_BOARD_LOG_DIRECTORY)
  #if HAL_OS_POSIX_IO || HAL_OS_FATFS_IO
-    if (_params.backend_types == DATAFLASH_BACKEND_FILE ||
-        _params.backend_types == DATAFLASH_BACKEND_BOTH) {
+    if (_params.backend_types & DATAFLASH_BACKEND_FILE) {
         LoggerMessageWriter_DFLogStart *message_writer =
             new LoggerMessageWriter_DFLogStart();
         if (message_writer != nullptr)  {
@@ -112,34 +116,11 @@ void AP_Logger::Init(const struct LogStructure *structures, uint8_t num_types)
             _next_backend++;
         }
     }
- #elif CONFIG_HAL_BOARD == HAL_BOARD_F4LIGHT 
-
-    if (_params.backend_types == DATAFLASH_BACKEND_FILE ||
-        _params.backend_types == DATAFLASH_BACKEND_BOTH) {
-
-        LoggerMessageWriter_DFLogStart *message_writer =
-            new LoggerMessageWriter_DFLogStart();
-        if (message_writer != nullptr)  {
-
-  #if defined(BOARD_SDCARD_NAME) || defined(BOARD_DATAFLASH_FATFS)
-            backends[_next_backend] = new AP_Logger_File(*this, message_writer, HAL_BOARD_LOG_DIRECTORY);
-  #else
-            backends[_next_backend] = new AP_Logger_Revo(*this, message_writer); // restore dataflash logs
-  #endif
-        }
-
-        if (backends[_next_backend] == nullptr) {
-            printf("Unable to open AP_Logger_Revo");
-        } else {
-            _next_backend++;
-        }
-    }
  #endif
 #endif // HAL_BOARD_LOG_DIRECTORY
 
 #if DATAFLASH_MAVLINK_SUPPORT
-    if (_params.backend_types == DATAFLASH_BACKEND_MAVLINK ||
-        _params.backend_types == DATAFLASH_BACKEND_BOTH) {
+    if (_params.backend_types & DATAFLASH_BACKEND_MAVLINK) {
         if (_next_backend == DATAFLASH_MAX_BACKENDS) {
             AP_HAL::panic("Too many backends");
             return;
@@ -158,6 +139,44 @@ void AP_Logger::Init(const struct LogStructure *structures, uint8_t num_types)
     }
 #endif
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (_params.backend_types & DATAFLASH_BACKEND_BLOCK) {
+        if (_next_backend == DATAFLASH_MAX_BACKENDS) {
+            AP_HAL::panic("Too many backends");
+            return;
+        }
+        LoggerMessageWriter_DFLogStart *message_writer =
+            new LoggerMessageWriter_DFLogStart();
+        if (message_writer != nullptr)  {
+            backends[_next_backend] = new AP_Logger_SITL(*this, message_writer);
+        }
+        if (backends[_next_backend] == nullptr) {
+            hal.console->printf("Unable to open AP_Logger_SITL");
+        } else {
+            _next_backend++;
+        }
+    }
+#endif
+
+#ifdef HAL_LOGGING_DATAFLASH
+    if (_params.backend_types & DATAFLASH_BACKEND_BLOCK) {
+        if (_next_backend == DATAFLASH_MAX_BACKENDS) {
+            AP_HAL::panic("Too many backends");
+            return;
+        }
+        LoggerMessageWriter_DFLogStart *message_writer =
+            new LoggerMessageWriter_DFLogStart();
+        if (message_writer != nullptr)  {
+            backends[_next_backend] = new AP_Logger_DataFlash(*this, message_writer);
+        }
+        if (backends[_next_backend] == nullptr) {
+            hal.console->printf("Unable to open AP_Logger_DataFlash");
+        } else {
+            _next_backend++;
+        }
+    }
+#endif
+    
     for (uint8_t i=0; i<_next_backend; i++) {
         backends[i]->Init();
     }
@@ -556,7 +575,7 @@ uint16_t AP_Logger::find_last_log() const {
     }
     return backends[0]->find_last_log();
 }
-void AP_Logger::get_log_boundaries(uint16_t log_num, uint16_t & start_page, uint16_t & end_page) {
+void AP_Logger::get_log_boundaries(uint16_t log_num, uint32_t & start_page, uint32_t & end_page) {
     if (_next_backend == 0) {
         return;
     }
