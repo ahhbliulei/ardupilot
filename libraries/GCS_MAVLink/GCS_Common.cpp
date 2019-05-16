@@ -25,7 +25,6 @@
 #include <AP_Camera/AP_Camera.h>
 #include <AP_Gripper/AP_Gripper.h>
 #include <AP_BLHeli/AP_BLHeli.h>
-#include <AP_Common/Semaphore.h>
 #include <AP_RSSI/AP_RSSI.h>
 #include <AP_Scheduler/AP_Scheduler.h>
 #include <AP_Mount/AP_Mount.h>
@@ -1508,6 +1507,7 @@ GCS_MAVLINK::update_receive(uint32_t max_time_us)
 
         // Try to get a new message
         if (mavlink_parse_char(chan, c, &msg, &status)) {
+            hal.util->persistent_data.last_mavlink_msgid = msg.msgid;
             hal.util->perf_begin(_perf_packet);
             packetReceived(status, msg);
             hal.util->perf_end(_perf_packet);
@@ -3738,6 +3738,8 @@ void GCS_MAVLINK::handle_command_long(mavlink_message_t *msg)
     mavlink_command_long_t packet;
     mavlink_msg_command_long_decode(msg, &packet);
 
+    hal.util->persistent_data.last_mavlink_cmd = packet.command;
+
     const MAV_RESULT result = handle_command_long_packet(packet);
 
     // send ACK or NAK
@@ -3854,6 +3856,8 @@ void GCS_MAVLINK::handle_command_int(mavlink_message_t *msg)
     // decode packet
     mavlink_command_int_t packet;
     mavlink_msg_command_int_decode(msg, &packet);
+
+    hal.util->persistent_data.last_mavlink_cmd = packet.command;
 
     const MAV_RESULT result = handle_command_int_packet(packet);
 
@@ -4428,10 +4432,17 @@ void GCS_MAVLINK::initialise_message_intervals_from_streamrates()
     for (uint8_t i=0; all_stream_entries[i].ap_message_ids != nullptr; i++) {
         initialise_message_intervals_for_stream(all_stream_entries[i].stream_id);
     }
+    set_mavlink_message_id_interval(MAVLINK_MSG_ID_HEARTBEAT, 1000);
 }
 
 bool GCS_MAVLINK::get_default_interval_for_ap_message(const ap_message id, uint16_t &interval) const
 {
+    if (id == MSG_HEARTBEAT) {
+        // handle heartbeat requests as a special case because heartbeat is not "streamed"
+        interval = 1000;
+        return true;
+    }
+
     // find which stream this ap_message is in
     for (uint8_t i=0; all_stream_entries[i].ap_message_ids != nullptr; i++) {
         const GCS_MAVLINK::stream_entries &entries = all_stream_entries[i];
