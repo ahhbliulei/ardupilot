@@ -232,7 +232,9 @@ float AP_Scheduler::load_average()
 void AP_Scheduler::loop()
 {
     // wait for an INS sample
+    hal.util->persistent_data.scheduler_task = -3;
     AP::ins().wait_for_sample();
+    hal.util->persistent_data.scheduler_task = -1;
 
     const uint32_t sample_time_us = AP_HAL::micros();
     
@@ -290,6 +292,7 @@ void AP_Scheduler::update_logging()
 // Write a performance monitoring packet
 void AP_Scheduler::Log_Write_Performance()
 {
+    const AP_HAL::Util::PersistentData &pd = hal.util->persistent_data;
     struct log_Performance pkt = {
         LOG_PACKET_HEADER_INIT(LOG_PERFORMANCE_MSG),
         time_us          : AP_HAL::micros64(),
@@ -298,7 +301,9 @@ void AP_Scheduler::Log_Write_Performance()
         max_time         : perf_info.get_max_time(),
         mem_avail        : hal.util->available_memory(),
         load             : (uint16_t)(load_average() * 1000),
-        internal_errors  : AP::internalerror().errors()
+        internal_errors  : AP::internalerror().errors(),
+        spi_count        : pd.spi_count,
+        i2c_count        : pd.i2c_count,
     };
     AP::logger().WriteCriticalBlock(&pkt, sizeof(pkt));
 }
