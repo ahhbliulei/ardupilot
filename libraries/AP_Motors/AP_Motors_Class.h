@@ -6,6 +6,7 @@
 #include <SRV_Channel/SRV_Channel.h>
 #include <Filter/Filter.h>         // filter library
 
+// motor_out和_motor_filtered数组中的电动机的偏移量--电机通道
 // offsets for motors in motor_out and _motor_filtered arrays
 #define AP_MOTORS_MOT_1 0U
 #define AP_MOTORS_MOT_2 1U
@@ -178,7 +179,7 @@ public:
     // pilot input in the -1 ~ +1 range for roll, pitch and yaw. 0~1 range for throttle
     void                set_radio_passthrough(float roll_input, float pitch_input, float throttle_input, float yaw_input);
 
-    // set loop rate. Used to support loop rate as a parameter
+    // set loop rate. Used to support loop rate as a parameter--设置循环速率。用于支持循环速率作为参数。
     void                set_loop_rate(uint16_t loop_rate) { _loop_rate = loop_rate; }
 
     // return the roll factor of any motor, this is used for tilt rotors and tail sitters

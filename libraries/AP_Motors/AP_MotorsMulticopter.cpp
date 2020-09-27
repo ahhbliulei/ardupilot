@@ -509,6 +509,7 @@ void AP_MotorsMulticopter::set_throttle_range(int16_t radio_min, int16_t radio_m
         return;
     }
 
+    // 这两个值传进去
     _throttle_radio_min = radio_min;
     _throttle_radio_max = radio_max;
 

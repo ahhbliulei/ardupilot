@@ -160,11 +160,14 @@ uint32_t AP_Motors::rc_map_mask(uint32_t mask) const
  */
 void AP_Motors::add_motor_num(int8_t motor_num)
 {
-    // ensure valid motor number is provided
+    // 确保电机序号是有效的----ensure valid motor number is provided
     if (motor_num >= 0 && motor_num < AP_MOTORS_MAX_NUM_MOTORS) {
         uint8_t chan;
+        // 获取对应的通道
         SRV_Channel::Aux_servo_function_t function = SRV_Channels::get_motor_function(motor_num);
+        // 设置进去
         SRV_Channels::set_aux_channel_default(function, motor_num);
+        // 查找是否不满足条件
         if (!SRV_Channels::find_channel(function, chan)) {
             gcs().send_text(MAV_SEVERITY_ERROR, "Motors: unable to setup motor %u", motor_num);
         }

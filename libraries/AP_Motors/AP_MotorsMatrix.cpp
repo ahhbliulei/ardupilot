@@ -22,14 +22,14 @@ extern const AP_HAL::HAL& hal;
 // init
 void AP_MotorsMatrix::init(motor_frame_class frame_class, motor_frame_type frame_type)
 {
-    // record requested frame class and type
+    // 记录请求的无人机类型（四旋翼,六旋翼）和无人机结构类型（x,+）---- record requested frame class and type
     _last_frame_class = frame_class;
     _last_frame_type = frame_type;
 
-    // setup the motors
+    // 初始化电机----setup the motors
     setup_motors(frame_class, frame_type);
 
-    // enable fast channels or instant pwm
+    // 启用快速通道或即时pwm----enable fast channels or instant pwm
     set_update_rate(_speed_hz);
 }
 
@@ -429,30 +429,34 @@ bool AP_MotorsMatrix::output_test_num(uint8_t output_channel, int16_t pwm)
 // add_motor
 void AP_MotorsMatrix::add_motor_raw(int8_t motor_num, float roll_fac, float pitch_fac, float yaw_fac, uint8_t testing_order)
 {
-    // ensure valid motor number is provided
+    // 确保提供的是有效的电机号----ensure valid motor number is provided
     if (motor_num >= 0 && motor_num < AP_MOTORS_MAX_NUM_MOTORS) {
 
+        // 如果此电机是新启用的电机，则增加电机数量
         // increment number of motors if this motor is being newly motor_enabled
         if (!motor_enabled[motor_num]) {
             motor_enabled[motor_num] = true;
         }
 
+        // 设置横摇、俯仰、俯仰系数和反向电机（用于稳定补丁）
         // set roll, pitch, thottle factors and opposite motor (for stability patch)
         _roll_factor[motor_num] = roll_fac;
         _pitch_factor[motor_num] = pitch_fac;
         _yaw_factor[motor_num] = yaw_fac;
 
-        // set order that motor appears in test
+        // 设置电机测试顺序----set order that motor appears in test
         _test_order[motor_num] = testing_order;
 
-        // call parent class method
+        // 号召父类的调用方法  call parent class method
         add_motor_num(motor_num);
     }
 }
 
+// add_motor仅使用位置和prop方向-假设对于每个电动机，侧倾和俯仰因子相等
 // add_motor using just position and prop direction - assumes that for each motor, roll and pitch factors are equal
 void AP_MotorsMatrix::add_motor(int8_t motor_num, float angle_degrees, float yaw_factor, uint8_t testing_order)
 {
+    // 调用5参数add_motor()函数
     add_motor(motor_num, angle_degrees, angle_degrees, yaw_factor, testing_order);
 }
 
@@ -467,6 +471,7 @@ void AP_MotorsMatrix::add_motor(int8_t motor_num, float roll_factor_in_degrees, 
         testing_order);
 }
 
+// remove_motor-禁用的电动机，并清除该电动机的所有侧倾，俯仰，油门系数
 // remove_motor - disabled motor and clears all roll, pitch, throttle factors for this motor
 void AP_MotorsMatrix::remove_motor(int8_t motor_num)
 {
@@ -482,24 +487,26 @@ void AP_MotorsMatrix::remove_motor(int8_t motor_num)
 
 void AP_MotorsMatrix::setup_motors(motor_frame_class frame_class, motor_frame_type frame_type)
 {
-    // remove existing motors
+    // 拆除现有电机----remove existing motors
     for (int8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        // 禁用电机并清除此电机的所有横摇、俯仰、油门系数
         remove_motor(i);
     }
 
+    // 定义布尔类型成功变量
     bool success = true;
 
     switch (frame_class) {
 
-        case MOTOR_FRAME_QUAD:
-            switch (frame_type) {
-                case MOTOR_FRAME_TYPE_PLUS:
+        case MOTOR_FRAME_QUAD:// 无人机类型是四旋翼
+            switch (frame_type) {// 并且判断结构类型是否是+/x
+                case MOTOR_FRAME_TYPE_PLUS://+类型
                     add_motor(AP_MOTORS_MOT_1,  90, AP_MOTORS_MATRIX_YAW_FACTOR_CCW, 2);
                     add_motor(AP_MOTORS_MOT_2, -90, AP_MOTORS_MATRIX_YAW_FACTOR_CCW, 4);
                     add_motor(AP_MOTORS_MOT_3,   0, AP_MOTORS_MATRIX_YAW_FACTOR_CW,  1);
                     add_motor(AP_MOTORS_MOT_4, 180, AP_MOTORS_MATRIX_YAW_FACTOR_CW,  3);
                     break;
-                case MOTOR_FRAME_TYPE_X:
+                case MOTOR_FRAME_TYPE_X://X类型
                     add_motor(AP_MOTORS_MOT_1,   45, AP_MOTORS_MATRIX_YAW_FACTOR_CCW, 1);
                     add_motor(AP_MOTORS_MOT_2, -135, AP_MOTORS_MATRIX_YAW_FACTOR_CCW, 3);
                     add_motor(AP_MOTORS_MOT_3,  -45, AP_MOTORS_MATRIX_YAW_FACTOR_CW,  4);

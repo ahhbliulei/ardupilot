@@ -7,8 +7,8 @@
 #include <RC_Channel/RC_Channel.h>     // RC Channel Library
 #include "AP_MotorsMulticopter.h"
 
-#define AP_MOTORS_MATRIX_YAW_FACTOR_CW   -1
-#define AP_MOTORS_MATRIX_YAW_FACTOR_CCW   1
+#define AP_MOTORS_MATRIX_YAW_FACTOR_CW   -1     //  顺时针
+#define AP_MOTORS_MATRIX_YAW_FACTOR_CCW   1     //  逆时针
 
 /// @class      AP_MotorsMatrix
 class AP_MotorsMatrix : public AP_MotorsMulticopter {

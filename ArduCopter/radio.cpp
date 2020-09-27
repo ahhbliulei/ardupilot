@@ -41,13 +41,15 @@ void Copter::init_rc_in()
  // init_rc_out -- initialise motors
 void Copter::init_rc_out()
 {
+    //设置电机速率
     motors->set_loop_rate(scheduler.get_loop_rate_hz());
+    //电机初始化
     motors->init((AP_Motors::motor_frame_class)g2.frame_class.get(), (AP_Motors::motor_frame_type)g.frame_type.get());
 
-    // enable aux servos to cope with multiple output channels per motor
+    // 使辅助伺服系统能够处理每个电机的多个输出通道----- enable aux servos to cope with multiple output channels per motor
     SRV_Channels::enable_aux_servos();
 
-    // update rate must be set after motors->init() to allow for motor mapping
+    // update rate must be set after motors->init() to allow for motor mapping--设置更新速度是490HZ
     motors->set_update_rate(g.rc_speed);
 
 #if FRAME_CONFIG != HELI_FRAME
@@ -55,16 +57,20 @@ void Copter::init_rc_out()
 #else
     // setup correct scaling for ESCs like the UAVCAN ESCs which
     // take a proportion of speed.
+    //为像UAVCAN PX4ESC这样的esc设置正确的缩放比例
+    //以一定的速度
     hal.rcout->set_esc_scaling(channel_throttle->get_radio_min(), channel_throttle->get_radio_max());
 #endif
 
     // refresh auxiliary channel to function map
+    // 刷新辅助通道到功能图
     SRV_Channels::update_aux_servo_function();
 
 #if FRAME_CONFIG != HELI_FRAME
     /*
       setup a default safety ignore mask, so that servo gimbals can be active while safety is on
      */
+    // 设置一个默认的安全忽略遮罩，这样伺服万向节可以在安全开启时激活
     uint16_t safety_ignore_mask = (~copter.motors->get_motor_mask()) & 0x3FFF;
     BoardConfig.set_default_safety_ignore_mask(safety_ignore_mask);
 #endif

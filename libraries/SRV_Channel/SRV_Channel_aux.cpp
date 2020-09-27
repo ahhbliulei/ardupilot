@@ -169,10 +169,11 @@ void SRV_Channels::update_aux_servo_function(void)
         functions[i].channel_mask = 0;
     }
 
-    // set auxiliary ranges
+    // 设置外部通道范围----set auxiliary ranges
     for (uint8_t i = 0; i < NUM_SERVO_CHANNELS; i++) {
         if ((uint8_t)channels[i].function.get() < SRV_Channel::k_nr_aux_servo_functions) {
-            channels[i].aux_servo_function_setup();
+            //初始化范围
+            channels[i].aux_servo_function_setup();// 注意这个函数
             function_mask.set((uint8_t)channels[i].function.get());
             functions[channels[i].function.get()].channel_mask |= 1U<<i;
         }
@@ -183,13 +184,16 @@ void SRV_Channels::update_aux_servo_function(void)
 /// Should be called after the the servo functions have been initialized
 void SRV_Channels::enable_aux_servos()
 {
+    // 设置伺服的默认初始化更新频率50Hz
     hal.rcout->set_default_rate(uint16_t(_singleton->default_rate.get()));
 
+    // 更新外部伺服功能
     update_aux_servo_function();
 
     // enable all channels that are set to a valid function. This
     // includes k_none servos, which allows those to get their initial
     // trim value on startup
+    // 启用设置为有效功能的所有通道。这包括k_none伺服系统，它允许启动时获得初始微调值
     for (uint8_t i = 0; i < NUM_SERVO_CHANNELS; i++) {
         SRV_Channel &c = channels[i];
         // see if it is a valid function
@@ -451,14 +455,18 @@ SRV_Channels::move_servo(SRV_Channel::Aux_servo_function_t function,
  */
 bool SRV_Channels::set_aux_channel_default(SRV_Channel::Aux_servo_function_t function, uint8_t channel)
 {
+    //判断有没有初始化
     if (!initialised) {
+        //没有初始化就进行更新设置
         update_aux_servo_function();
     }
+    //已经分配好直接返回
     if (function_assigned(function)) {
-        // already assigned
+        // 已经分配---already assigned
         return true;
     }
     if (channels[channel].function != SRV_Channel::k_none) {
+        // 配置好了直接返回
         if (channels[channel].function == function) {
             return true;
         }
@@ -467,6 +475,7 @@ bool SRV_Channels::set_aux_channel_default(SRV_Channel::Aux_servo_function_t fun
                             (unsigned)channels[channel].function);
         return false;
     }
+    // 进行配置
     channels[channel].type_setup = false;
     channels[channel].function.set(function);
     channels[channel].aux_servo_function_setup();
