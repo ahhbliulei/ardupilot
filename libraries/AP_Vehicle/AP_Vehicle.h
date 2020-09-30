@@ -250,6 +250,7 @@ protected:
 
     AP_ServoRelayEvents ServoRelayEvents;
 
+    // LED，蜂鸣器等的通知对象（参数设置为false可禁用外部LED）
     // notification object for LEDs, buzzers etc (parameter set to
     // false disables external leds)
     AP_Notify notify;

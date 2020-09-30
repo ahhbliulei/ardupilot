@@ -149,7 +149,7 @@ private:
     AP_Float        _alt_min;               // altitude lower limit in meters
     AP_Float        _circle_radius;         // circle fence radius in meters
     AP_Float        _margin;                // distance in meters that autopilot's should maintain from the fence to avoid a breach
-    AP_Int8         _total;                 // number of polygon points saved in eeprom
+    AP_Int8         _total;                 // number of polygon points saved in eeprom--eeprom中保存的多边形点数
 
     // backup fences
     float           _alt_max_backup;        // backup altitude upper limit in meters used to refire the breach if the vehicle continues to move further away

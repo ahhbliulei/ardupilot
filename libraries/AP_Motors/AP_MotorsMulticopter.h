@@ -76,6 +76,8 @@ public:
     // flight. Thrust is in the range 0 to 1
     virtual void        output_motor_mask(float thrust, uint8_t mask, float rudder_dt);
 
+    // get_motor_mask-返回一个位掩码，该位掩码的输出正用于电机（使用1表示正在使用），
+    // 可用于确保其他pwm输出（即用于伺服器）不冲突
     // get_motor_mask - returns a bitmask of which outputs are being used for motors (1 means being used)
     //  this can be used to ensure other pwm outputs (i.e. for servos) do not conflict
     virtual uint16_t    get_motor_mask() override;

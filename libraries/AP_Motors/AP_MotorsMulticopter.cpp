@@ -739,6 +739,7 @@ void AP_MotorsMulticopter::set_throttle_passthrough_for_esc_calibration(float th
                 rc_write(i, pwm_out);
             }
         }
+        // 将pwm输出发送到双翼飞机使用的通道
         // send pwm output to channels used by bicopter
         SRV_Channels::set_output_pwm(SRV_Channel::k_throttleRight, pwm_out);
         SRV_Channels::set_output_pwm(SRV_Channel::k_throttleLeft, pwm_out);
