@@ -600,6 +600,7 @@ void Copter::read_AHRS(void)
     gcs().update();
 #endif
 
+    // 我们告诉AHRS跳过INS更新，因为我们已经在fast_loop（）中完成了更新
     // we tell AHRS to skip INS update as we have already done it in fast_loop()
     ahrs.update(true);
 }

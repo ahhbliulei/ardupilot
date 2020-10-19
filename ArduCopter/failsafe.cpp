@@ -29,7 +29,7 @@ void Copter::failsafe_disable()
     failsafe_enabled = false;
 }
 
-//
+//  failsafe_check-从内核定时器中断以1kHz调用此函数。
 //  failsafe_check - this function is called from the core timer interrupt at 1kHz.
 //
 void Copter::failsafe_check()
