@@ -5,6 +5,7 @@
 #include <AP_Common/AP_Common.h>
 #include <AP_Math/AP_Math.h>            // ArduPilot Mega Vector/Matrix math Library
 #include <AP_Param/AP_Param.h>
+#include <AP_Logger/AP_Logger_config.h>
 
 // swashplate types
 enum SwashPlateType {
@@ -19,7 +20,7 @@ enum SwashPlateType {
 class AP_MotorsHeli_Swash {
 public:
 
-    AP_MotorsHeli_Swash(uint8_t mot_0, uint8_t mot_1, uint8_t mot_2, uint8_t mot_3);
+    AP_MotorsHeli_Swash(uint8_t mot_0, uint8_t mot_1, uint8_t mot_2, uint8_t mot_3, uint8_t instance);
 
     // configure - configure the swashplate settings for any updated parameters
     void configure();
@@ -34,10 +35,15 @@ public:
     void output();
 
     // get_phase_angle - returns the rotor phase angle
-    int16_t get_phase_angle() const { return _phase_angle; }
+    float get_phase_angle() const { return _phase_angle; }
 
     // Get function output mask
     uint32_t get_output_mask() const;
+
+#if HAL_LOGGING_ENABLED
+    // Write SWSH log for this instance of swashplate
+    void write_log(float cyclic_scaler, float col_ang_min, float col_ang_max, int16_t col_min, int16_t col_max) const;
+#endif
 
     // var_info
     static const struct AP_Param::GroupInfo var_info[];
@@ -51,7 +57,7 @@ private:
     void calculate_roll_pitch_collective_factors();
 
     // Setup a servo
-    void add_servo_angle(uint8_t num, float angle, float collective);
+    void add_servo_angle(uint8_t num, float scale, float angle, float collective);
     void add_servo_raw(uint8_t num, float roll, float pitch, float collective);
 
     // write to a swash servo. output value is pwm
@@ -75,7 +81,13 @@ private:
     float                _pitchFactor[_max_num_servos];             // Pitch axis scaling of servo output based on servo position
     float                _collectiveFactor[_max_num_servos];        // Collective axis scaling of servo output based on servo position
     float                _output[_max_num_servos];                  // Servo output value
-    uint8_t              _motor_num[_max_num_servos];               // Motor function to use for output
+    const uint8_t        _motor_num[_max_num_servos];               // Motor function to use for output
+    const uint8_t        _instance;                                 // Swashplate instance. Used for logging.
+
+    // Variables stored for logging
+    float _roll_input;
+    float _pitch_input;
+    float _collective_input_scaled;
 
     // parameters
     AP_Int8  _swashplate_type;                   // Swash Type Setting
@@ -85,7 +97,7 @@ private:
     AP_Int16 _servo1_pos;                        // servo1 azimuth position on swashplate with front of heli being 0 deg
     AP_Int16 _servo2_pos;                        // servo2 azimuth position on swashplate with front of heli being 0 deg
     AP_Int16 _servo3_pos;                        // servo3 azimuth position on swashplate with front of heli being 0 deg
-    AP_Int16 _phase_angle;                       // Phase angle correction for rotor head.  If pitching the swash forward induces 
+    AP_Float _phase_angle;                       // Phase angle correction for rotor head.  If pitching the swash forward induces 
                                                  // a roll, this can be negative depending on mechanics.
 
 };

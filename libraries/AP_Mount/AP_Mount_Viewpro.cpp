@@ -1,13 +1,15 @@
-#include "AP_Mount_Viewpro.h"
+#include "AP_Mount_config.h"
 
 #if HAL_MOUNT_VIEWPRO_ENABLED
+
+#include "AP_Mount_Viewpro.h"
+
 #include <AP_HAL/AP_HAL.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_GPS/AP_GPS.h>
 #include <AP_RTC/AP_RTC.h>
 #include <GCS_MAVLink/GCS.h>
 #include <GCS_MAVLink/include/mavlink/v2.0/checksum.h>
-#include <AP_SerialManager/AP_SerialManager.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -18,9 +20,10 @@ extern const AP_HAL::HAL& hal;
 #define AP_MOUNT_VIEWPRO_DATALEN_MAX   (AP_MOUNT_VIEWPRO_PACKETLEN_MAX-AP_MOUNT_VIEWPRO_PACKETLEN_MIN) // max bytes for data portion of packet
 #define AP_MOUNT_VIEWPRO_HEALTH_TIMEOUT_MS 1000 // state will become unhealthy if no attitude is received within this timeout
 #define AP_MOUNT_VIEWPRO_UPDATE_INTERVAL_MS 100 // resend angle or rate targets to gimbal at this interval
-#define AP_MOUNT_VIEWPRO_ZOOM_SPEED     0x07    // hard-coded zoom speed (fast)
-#define AP_MOUNT_VIEWPRO_ZOOM_MAX       20      // hard-coded absolute zoom times max
-#define AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT  (65536.0 / 360.0)   // scalar to convert degrees to the viewpro angle scaling
+#define AP_MOUNT_VIEWPRO_EO_ZOOM_SPEED     0x07    // hard-coded zoom speed (fast)
+#define AP_MOUNT_VIEWPRO_IR_ZOOM_SPEED     1 
+#define AP_MOUNT_VIEWPRO_ZOOM_MAX       10      // hard-coded absolute zoom times max
+#define AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT  (65536.0 / M_2PI)   // scalar to convert radians to the viewpro angle scaling
 #define AP_MOUNT_VIEWPRO_OUTPUT_TO_DEG  (360.0 / 65536.0)   // scalar to convert viewpro angle scaling to degrees
 
 #define AP_MOUNT_VIEWPRO_DEBUG 0
@@ -28,22 +31,11 @@ extern const AP_HAL::HAL& hal;
 
 const char* AP_Mount_Viewpro::send_text_prefix = "Viewpro:";
 
-// init - performs any required initialisation for this instance
-void AP_Mount_Viewpro::init()
-{
-    const AP_SerialManager& serial_manager = AP::serialmanager();
-
-    _uart = serial_manager.find_serial(AP_SerialManager::SerialProtocol_Gimbal, 0);
-    if (_uart != nullptr) {
-        _initialised = true;
-    }
-
-    AP_Mount_Backend::init();
-}
-
 // update mount position - should be called periodically
 void AP_Mount_Viewpro::update()
 {
+    AP_Mount_Backend::update();
+
     // exit immediately if not initialised
     if (!_initialised) {
         return;
@@ -60,6 +52,16 @@ void AP_Mount_Viewpro::update()
     // reading incoming packets from gimbal
     read_incoming_packets();
 
+    // request model name
+    if (!_got_model_name) {
+        send_comm_config_cmd(CommConfigCmd::QUERY_MODEL);
+    }
+
+    // request firmware version
+    if (!_got_firmware_version) {
+        send_comm_config_cmd(CommConfigCmd::QUERY_FIRMWARE_VER);
+    }
+
     // send handshake
     send_handshake();
 
@@ -72,80 +74,10 @@ void AP_Mount_Viewpro::update()
     }
 
     // update based on mount mode
-    switch (get_mode()) {
-        // move mount to a "retracted" position.  To-Do: remove support and replace with a relaxed mode?
-        case MAV_MOUNT_MODE_RETRACT: {
-            const Vector3f &angle_bf_target = _params.retract_angles.get();
-            mnt_target.target_type = MountTargetType::ANGLE;
-            mnt_target.angle_rad.set(angle_bf_target*DEG_TO_RAD, false);
-            break;
-        }
-
-        // move mount to a neutral position, typically pointing forward
-        case MAV_MOUNT_MODE_NEUTRAL: {
-            const Vector3f &angle_bf_target = _params.neutral_angles.get();
-            mnt_target.target_type = MountTargetType::ANGLE;
-            mnt_target.angle_rad.set(angle_bf_target*DEG_TO_RAD, false);
-            break;
-        }
-
-        // point to the angles given by a mavlink message
-        case MAV_MOUNT_MODE_MAVLINK_TARGETING:
-            // mavlink targets are stored while handling the incoming message
-            break;
-
-        // RC radio manual angle control, but with stabilization from the AHRS
-        case MAV_MOUNT_MODE_RC_TARGETING: {
-            // update targets using pilot's RC inputs
-            MountTarget rc_target;
-            get_rc_target(mnt_target.target_type, rc_target);
-            switch (mnt_target.target_type) {
-            case MountTargetType::ANGLE:
-                mnt_target.angle_rad = rc_target;
-                break;
-            case MountTargetType::RATE:
-                mnt_target.rate_rads = rc_target;
-                break;
-            }
-            break;
-        }
-
-        // point mount to a GPS point given by the mission planner
-        case MAV_MOUNT_MODE_GPS_POINT:
-            if (get_angle_target_to_roi(mnt_target.angle_rad)) {
-                mnt_target.target_type = MountTargetType::ANGLE;
-            }
-            break;
-
-        // point mount to Home location
-        case MAV_MOUNT_MODE_HOME_LOCATION:
-            if (get_angle_target_to_home(mnt_target.angle_rad)) {
-                mnt_target.target_type = MountTargetType::ANGLE;
-            }
-            break;
-
-        // point mount to another vehicle
-        case MAV_MOUNT_MODE_SYSID_TARGET:
-            if (get_angle_target_to_sysid(mnt_target.angle_rad)) {
-                mnt_target.target_type = MountTargetType::ANGLE;
-            }
-            break;
-
-        default:
-            // we do not know this mode so raise internal error
-            INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
-            break;
-    }
+    update_mnt_target();
 
     // send target angles or rates depending on the target type
-    switch (mnt_target.target_type) {
-        case MountTargetType::ANGLE:
-            send_target_angles(mnt_target.angle_rad.pitch, mnt_target.angle_rad.yaw, mnt_target.angle_rad.yaw_is_ef);
-            break;
-        case MountTargetType::RATE:
-            send_target_rates(mnt_target.rate_rads.pitch, mnt_target.rate_rads.yaw, mnt_target.rate_rads.yaw_is_ef);
-            break;
-    }
+    send_target_to_gimbal();
 }
 
 // return true if healthy
@@ -287,6 +219,39 @@ void AP_Mount_Viewpro::process_packet()
     case FrameId::HANDSHAKE:
         break;
 
+    case FrameId::V: {
+        const CommConfigCmd control_cmd = (CommConfigCmd)_msg_buff[_msg_buff_data_start];
+        switch (control_cmd) {
+        case CommConfigCmd::QUERY_FIRMWARE_VER: {
+            // firmware version, length is 20 bytes but we expect format of "S" + yyyymmdd
+            const uint8_t fw_major_str[3] {_msg_buff[_msg_buff_data_start+4], _msg_buff[_msg_buff_data_start+5], 0x0};
+            const uint8_t fw_minor_str[3] {_msg_buff[_msg_buff_data_start+6], _msg_buff[_msg_buff_data_start+7], 0x0};
+            const uint8_t fw_patch_str[3] {_msg_buff[_msg_buff_data_start+8], _msg_buff[_msg_buff_data_start+9], 0x0};
+            const uint8_t major_ver = atoi((const char*)fw_major_str) & 0xFF;
+            const uint8_t minor_ver = atoi((const char*)fw_minor_str) & 0xFF;
+            const uint8_t patch_ver = atoi((const char*)fw_patch_str) & 0xFF;
+            _firmware_version = (patch_ver << 16) | (minor_ver << 8) | major_ver;
+            _got_firmware_version = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s fw:%u.%u.%u", send_text_prefix, (unsigned)major_ver, (unsigned)minor_ver, (unsigned)patch_ver);
+            break;
+        }
+        case CommConfigCmd::QUERY_MODEL:
+            if (_parsed_msg.data_bytes_received == 0) {
+                break;
+            }
+            // gimbal model, length is 10 bytes
+            memset(_model_name, '\0', sizeof(_model_name));
+            memcpy(_model_name, &_msg_buff[_msg_buff_data_start+1], MIN(sizeof(_model_name)-1, (size_t)(_parsed_msg.data_bytes_received-1)));
+            _got_model_name = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s %s", send_text_prefix, _model_name);
+            break;
+        default:
+            // unsupported control command
+            break;
+        }
+        break;
+    }
+
     case FrameId::T1_F1_B1_D1: {
         // T1 holds target info including target lean angles
         // F1 holds tracker sensor status (which camera, tracking vs lost)
@@ -298,16 +263,16 @@ void AP_Mount_Viewpro::process_packet()
             _last_tracking_status = tracking_status;
             switch (tracking_status) {
             case TrackingStatus::STOPPED:
-                gcs().send_text(MAV_SEVERITY_INFO, "%s tracking OFF", send_text_prefix);
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s tracking OFF", send_text_prefix);
                 break;
             case TrackingStatus::SEARCHING:
-                gcs().send_text(MAV_SEVERITY_INFO, "%s tracking searching", send_text_prefix);
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s tracking searching", send_text_prefix);
                 break;
             case TrackingStatus::TRACKING:
-                gcs().send_text(MAV_SEVERITY_INFO, "%s tracking ON", send_text_prefix);
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s tracking ON", send_text_prefix);
                 break;
             case TrackingStatus::LOST:
-                gcs().send_text(MAV_SEVERITY_INFO, "%s tracking Lost", send_text_prefix);
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s tracking Lost", send_text_prefix);
                 break;
             }
         }
@@ -317,6 +282,33 @@ void AP_Mount_Viewpro::process_packet()
         _current_angle_rad.z = radians((int16_t)UINT16_VALUE(_msg_buff[_msg_buff_data_start+25], _msg_buff[_msg_buff_data_start+26]) * AP_MOUNT_VIEWPRO_OUTPUT_TO_DEG); // yaw angle
         _current_angle_rad.y = -radians((int16_t)UINT16_VALUE(_msg_buff[_msg_buff_data_start+27], _msg_buff[_msg_buff_data_start+28]) * AP_MOUNT_VIEWPRO_OUTPUT_TO_DEG); // pitch angle
         debug("r:%4.1f p:%4.1f y:%4.1f", (double)degrees(_current_angle_rad.x), (double)degrees(_current_angle_rad.y), (double)degrees(_current_angle_rad.z));
+
+        // get active image sensor. D1's image sensor values are one value lower than C1's
+        _image_sensor = ImageSensor((_msg_buff[_msg_buff_data_start+29] & 0x07) + 1);
+
+        // get recording status
+        const RecordingStatus recording_status = (RecordingStatus)(_msg_buff[_msg_buff_data_start+32] & 0x07);
+        const bool recording = (recording_status == RecordingStatus::RECORDING);
+        if (recording != _recording) {
+            _recording = recording;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO,  "%s recording %s", send_text_prefix, _recording ? "ON" : "OFF");
+        }
+
+        switch (_image_sensor) {
+            default:   
+            case ImageSensor::EO1:
+            case ImageSensor::EO1_IR_PIP:
+                //optical zoom times
+                _zoom_times = UINT16_VALUE(_msg_buff[_msg_buff_data_start+39], _msg_buff[_msg_buff_data_start+40]) * 0.1;
+                break;
+            case ImageSensor::IR:
+            case ImageSensor::IR_EO1_PIP:
+                //ir zoom times
+                _zoom_times = ((_msg_buff[_msg_buff_data_start+29] >> 3) & 0x0F) + 1;
+                break;
+        }        
+        // get laser rangefinder distance
+        _rangefinder_dist_m = UINT16_VALUE(_msg_buff[_msg_buff_data_start+33], _msg_buff[_msg_buff_data_start+34]) * 0.1;
         break;
     }
 
@@ -398,7 +390,12 @@ bool AP_Mount_Viewpro::send_packet(const uint8_t* databuff, uint8_t databuff_len
 // send handshake, gimbal will respond with T1_F1_B1_D1 paket that includes current angles
 void AP_Mount_Viewpro::send_handshake()
 {
-    HandshakePacket hs_packet {FrameId::HANDSHAKE, 0};
+    const HandshakePacket hs_packet {
+        .content = {
+            frame_id: FrameId::HANDSHAKE,
+            unused: 0
+        }
+    };
     send_packet(hs_packet.bytes, sizeof(hs_packet.bytes));
 }
 
@@ -413,9 +410,12 @@ bool AP_Mount_Viewpro::set_lock(bool lock)
     }
 
     // fill in packet
-    A1Packet a1_packet {};
-    a1_packet.content.frame_id = FrameId::A1;
-    a1_packet.content.servo_status = lock ? ServoStatus::follow_yaw_disable : ServoStatus::follow_yaw;
+    const A1Packet a1_packet {
+        .content = {
+            frame_id: FrameId::A1,
+            servo_status: lock ? ServoStatus::FOLLOW_YAW_DISABLE : ServoStatus::FOLLOW_YAW
+        }
+    };
 
     // send targets to gimbal
     if (send_packet(a1_packet.bytes, sizeof(a1_packet.bytes))) {
@@ -425,13 +425,31 @@ bool AP_Mount_Viewpro::set_lock(bool lock)
     return false;
 }
 
-// send target pitch and yaw rates to gimbal
-// yaw_is_ef should be true if yaw_rads target is an earth frame rate, false if body_frame
-bool AP_Mount_Viewpro::send_target_rates(float pitch_rads, float yaw_rads, bool yaw_is_ef)
+// send communication configuration command (aka U packet), gimbal will respond with a V packet
+bool AP_Mount_Viewpro::send_comm_config_cmd(CommConfigCmd cmd)
 {
+    // fill in packet
+    const UPacket u_packet {
+        .content = {
+            frame_id: FrameId::U,
+            control_cmd: cmd
+        }
+    };
+
+    // send targets to gimbal
+    return send_packet(u_packet.bytes, sizeof(u_packet.bytes));
+}
+
+// send target pitch and yaw rates to gimbal
+void AP_Mount_Viewpro::send_target_rates(const MountRateTarget &rate_rads)
+{
+    const float pitch_rads = rate_rads.pitch;
+    const float yaw_rads = rate_rads.yaw;
+    const bool yaw_is_ef = rate_rads.yaw_is_ef;
+
     // set lock value
     if (!set_lock(yaw_is_ef)) {
-        return false;
+        return;
     }
 
     // scale pitch and yaw to values gimbal understands
@@ -439,67 +457,78 @@ bool AP_Mount_Viewpro::send_target_rates(float pitch_rads, float yaw_rads, bool 
     const int16_t yaw_rate_output = degrees(yaw_rads) * 100.0;
 
     // fill in packet
-    A1Packet a1_packet {};
-    a1_packet.content.frame_id = FrameId::A1;
-    a1_packet.content.servo_status = ServoStatus::manual_speed_mode;
-    a1_packet.content.yaw_be = htobe16(yaw_rate_output);
-    a1_packet.content.pitch_be = htobe16(pitch_rate_output);
+    const A1Packet a1_packet {
+        .content = {
+            frame_id: FrameId::A1,
+            servo_status: ServoStatus::MANUAL_SPEED_MODE,
+            yaw_be: htobe16(yaw_rate_output),
+            pitch_be: htobe16(pitch_rate_output)
+        }
+    };
 
     // send targets to gimbal
-    return send_packet(a1_packet.bytes, sizeof(a1_packet.bytes));
+    send_packet(a1_packet.bytes, sizeof(a1_packet.bytes));
 }
 
 // send target pitch and yaw angles to gimbal
-// yaw_is_ef should be true if yaw_rad target is an earth frame angle, false if body_frame
-bool AP_Mount_Viewpro::send_target_angles(float pitch_rad, float yaw_rad, bool yaw_is_ef)
+void AP_Mount_Viewpro::send_target_angles(const MountAngleTarget &angle_rad)
 {
+    const float pitch_rad = angle_rad.pitch;
+    const float yaw_rad = angle_rad.yaw;
+
     // gimbal does not support lock in angle control mode
     if (!set_lock(false)) {
-        return false;
+        return;
     }
 
     // convert yaw angle to body-frame
-    float yaw_bf_rad = yaw_is_ef ? wrap_PI(yaw_rad - AP::ahrs().yaw) : yaw_rad;
+    float yaw_bf_rad = angle_rad.yaw_is_ef ? wrap_PI(yaw_rad - AP::ahrs().get_yaw_rad()) : yaw_rad;
 
     // enforce body-frame yaw angle limits.  If beyond limits always use body-frame control
     const float yaw_bf_min = radians(_params.yaw_angle_min);
     const float yaw_bf_max = radians(_params.yaw_angle_max);
     if (yaw_bf_rad < yaw_bf_min || yaw_bf_rad > yaw_bf_max) {
         yaw_bf_rad = constrain_float(yaw_bf_rad, yaw_bf_min, yaw_bf_max);
-        yaw_is_ef = false;
     }
 
     // scale pitch and yaw to values gimbal understands
-    const int16_t pitch_angle_output = -degrees(pitch_rad) * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT;
-    const int16_t yaw_angle_output = degrees(yaw_bf_rad) * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT;
+    const int16_t pitch_angle_output = -pitch_rad * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT;
+    const int16_t yaw_angle_output = yaw_bf_rad * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT;
 
     // fill in packet
-    A1Packet a1_packet {};
-    a1_packet.content.frame_id = FrameId::A1;
-    a1_packet.content.servo_status = ServoStatus::manual_absolute_angle_mode;
-    a1_packet.content.yaw_be = htobe16(yaw_angle_output);
-    a1_packet.content.pitch_be = htobe16(pitch_angle_output);
+    const A1Packet a1_packet {
+        .content = {
+            frame_id: FrameId::A1,
+            servo_status: ServoStatus::MANUAL_ABSOLUTE_ANGLE_MODE,
+            yaw_be: htobe16(yaw_angle_output),
+            pitch_be: htobe16(pitch_angle_output)
+        }
+    };
 
     // send targets to gimbal
-    return send_packet(a1_packet.bytes, sizeof(a1_packet.bytes));
+    send_packet(a1_packet.bytes, sizeof(a1_packet.bytes));
 }
 
-// send camera command and corresponding value (e.g. zoom speed)
-bool AP_Mount_Viewpro::send_camera_command(CameraCommand cmd, uint8_t value)
+// send camera command, affected image sensor and value (e.g. zoom speed)
+bool AP_Mount_Viewpro::send_camera_command(ImageSensor img_sensor, CameraCommand cmd, uint8_t value, LRFCommand lrf_cmd)
 {
-    // fill in packet
-    C1Packet c1_packet {};
-    c1_packet.content.frame_id = FrameId::C1;
-
     // fill in 2 bytes containing sensor, zoom speed, operation command and LRF
     // bit0~2: sensor
     // bit3~5: zoom speed
     // bit6~12: operation command no
-    // bit13~15: LRF command (unused)
-    const uint16_t sensor_id = (uint16_t)ImageSensor::EO1;
+    // bit13~15: LRF command
+    const uint16_t sensor_id = (uint16_t)img_sensor;
     const uint16_t zoom_speed = ((uint16_t)value & 0x07) << 3;
     const uint16_t operation_cmd = ((uint16_t)cmd & 0x7F) << 6;
-    c1_packet.content.sensor_zoom_cmd_be =  htobe16(sensor_id | zoom_speed | operation_cmd);
+    const uint16_t rangefinder_cmd = ((uint16_t)lrf_cmd & 0x07) << 13;
+
+    // fill in packet
+    const C1Packet c1_packet {
+        .content = {
+            frame_id: FrameId::C1,
+            sensor_zoom_cmd_be:  htobe16(sensor_id | zoom_speed | operation_cmd | rangefinder_cmd)
+        }
+    };
 
     // send packet to gimbal
     return send_packet(c1_packet.bytes, sizeof(c1_packet.bytes));
@@ -509,10 +538,13 @@ bool AP_Mount_Viewpro::send_camera_command(CameraCommand cmd, uint8_t value)
 bool AP_Mount_Viewpro::send_camera_command2(CameraCommand2 cmd, uint16_t value)
 {
     // fill in packet
-    C2Packet c2_packet {};
-    c2_packet.content.frame_id = FrameId::C2;
-    c2_packet.content.cmd = cmd;
-    c2_packet.content.value_be = htobe16(value);
+    const C2Packet c2_packet {
+        .content = {
+            frame_id: FrameId::C2,
+            cmd: cmd,
+            value_be: htobe16(value)
+        }
+    };
 
     // send packet to gimbal
     return send_packet(c2_packet.bytes, sizeof(c2_packet.bytes));
@@ -521,26 +553,47 @@ bool AP_Mount_Viewpro::send_camera_command2(CameraCommand2 cmd, uint16_t value)
 // send tracking command and corresponding value (normally zero)
 bool AP_Mount_Viewpro::send_tracking_command(TrackingCommand cmd, uint8_t value)
 {
+    // convert image sensor to tracking source
+    TrackingSource tracking_source = TrackingSource::EO1;
+    switch (_image_sensor) {
+    case ImageSensor::NO_ACTION:    
+    case ImageSensor::EO1:
+    case ImageSensor::EO1_IR_PIP:
+    case ImageSensor::FUSION:
+        tracking_source = TrackingSource::EO1;
+        break;
+    case ImageSensor::IR:
+    case ImageSensor::IR_EO1_PIP:
+    case ImageSensor::IR1_13MM:
+    case ImageSensor::IR2_52MM:
+        tracking_source = TrackingSource::IR;
+        break;    
+    }
+
     // fill in packet
+    // Packet creation is done long-hand here to support g++-7.5.0
     E1Packet e1_packet {};
     e1_packet.content.frame_id = FrameId::E1;
-    e1_packet.content.source = TrackingSource::EO1; // hard-coded to only affect RGB sensor for now
+    e1_packet.content.source = tracking_source;
     e1_packet.content.cmd = cmd;
-    e1_packet.content.param2 = value;               // normally zero
+    e1_packet.content.param2 = value; // normally zero
 
     // send packet to gimbal
     return send_packet(e1_packet.bytes, sizeof(e1_packet.bytes));
 }
 
 // send camera command2 and corresponding parameter values
-bool AP_Mount_Viewpro::send_tracking_command2(TrackingCommand2 cmd, uint16_t param1, uint16_t param2)
+bool AP_Mount_Viewpro::send_tracking_command2(TrackingCommand2 cmd, int16_t param1, int16_t param2)
 {
     // fill in packet
-    E2Packet e2_packet {};
-    e2_packet.content.frame_id = FrameId::E2;
-    e2_packet.content.cmd = cmd;
-    e2_packet.content.param1_be = htobe16(param1);
-    e2_packet.content.param2_be = htobe16(param2);
+    const E2Packet e2_packet {
+        .content = {
+            frame_id: FrameId::E2,
+            cmd: cmd,
+            param1_be: htobe16(param1),
+            param2_be: htobe16(param2),
+        }
+    };
 
     // send packet to gimbal
     return send_packet(e2_packet.bytes, sizeof(e2_packet.bytes));
@@ -556,43 +609,55 @@ bool AP_Mount_Viewpro::send_m_ahrs()
         return false;
     }
 
+#if AP_RTC_ENABLED
     // get date and time
     uint16_t year, ms;
     uint8_t month, day, hour, min, sec;
     if (!AP::rtc().get_date_and_time_utc(year, month, day, hour, min, sec, ms)) {
-        year = month = day = hour = min = sec = 0;
+        year = month = day = hour = min = sec = ms = 0;
     }
-    uint16_t date = ((year-2000) & 0x7f) | (((month+1) & 0x0F) << 7) | ((day & 0x0F) << 11);
+    uint16_t date = ((year-2000) & 0x7f) | (((month+1) & 0x0F) << 7) | ((day & 0x1F) << 11);
     uint64_t second_hundredths = (((hour * 60 * 60) + (min * 60) + sec) * 100) + (ms * 0.1);
+#else
+    const uint16_t date = 0;
+    const uint64_t second_hundredths = 0;
+#endif
 
     // get vehicle velocity in m/s in NED Frame
     Vector3f vel_NED;
     IGNORE_RETURN(AP::ahrs().get_velocity_NED(vel_NED));
-    float vel_yaw_deg = degrees(vel_NED.xy().angle());
+    const float vel_yaw_rad = wrap_2PI(vel_NED.xy().angle());
 
     // get GPS vdop
     uint16_t gps_vdop = AP::gps().get_vdop();
 
+    // get vehicle yaw in the range 0 to 2*pi
+    const float veh_yaw_rad = wrap_2PI(AP::ahrs().get_yaw_rad());
+
     // fill in packet
-    M_AHRSPacket mahrs_packet{};
-    mahrs_packet.content.frame_id = FrameId::M_AHRS;
-    mahrs_packet.content.data_type = 0x07;  // Bit0: Attitude, Bit1: GPS, Bit2 Gyro
-    mahrs_packet.content.pitch_be = htobe16(-degrees(AP::ahrs().get_pitch()) * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT); // vehicle pitch angle.  1bit=360deg/65536
-    mahrs_packet.content.roll_be = htobe16(degrees(AP::ahrs().get_roll()) * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT);    // vehicle roll angle.  1bit=360deg/65536
-    mahrs_packet.content.yaw_be = htobe16(degrees(AP::ahrs().get_yaw()) * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT);      // vehicle yaw angle.  1bit=360deg/65536
-    mahrs_packet.content.date_be = htobe16(date);           // bit0~6:year, bit7~10:month, bit11~15:day
-    mahrs_packet.content.seconds_utc[0] = uint8_t((second_hundredths & 0xFF0000ULL) >> 16); // seconds * 100 MSB.  1bit = 0.01sec
-    mahrs_packet.content.seconds_utc[1] = uint8_t((second_hundredths & 0xFF00ULL) >> 8);    // seconds * 100 next MSB.  1bit = 0.01sec
-    mahrs_packet.content.seconds_utc[2] = uint8_t(second_hundredths & 0xFFULL);             // seconds * 100 LSB.  1bit = 0.01sec
-    mahrs_packet.content.gps_yaw_be = htobe16(vel_yaw_deg * AP_MOUNT_VIEWPRO_DEG_TO_OUTPUT); // GPS yaw
-    mahrs_packet.content.position_mark_bitmask = 0x0F;      // bit0:new position, bit1:clock fix calced, bit2:horiz calced, bit3:alt calced
-    mahrs_packet.content.latitude_be = htobe32(loc.lat);    // latitude.  1bit = 10e-7
-    mahrs_packet.content.longitude_be = htobe32(loc.lng);   // longitude.  1bit = 10e-7
-    mahrs_packet.content.height_be = htobe32(alt_amsl_cm * 10); // height.  1bit = 1mm
-    mahrs_packet.content.ground_speed_N_be = htobe16(vel_NED.x * 100);  // ground speed in North direction. 1bit = 0.01m/s
-    mahrs_packet.content.ground_speed_E_be = htobe16(vel_NED.y * 100);  // ground speed in East direction. 1bit = 0.01m/s
-    mahrs_packet.content.vdop_be = htobe16(gps_vdop);       // GPS vdop. 1bit = 0.01
-    mahrs_packet.content.ground_speed_D_be = htobe16(vel_NED.z * 100);  // speed downwards. 1bit = 0.01m/s
+    const M_AHRSPacket mahrs_packet {
+        .content = {
+            frame_id: FrameId::M_AHRS,
+            data_type: 0x07,                        // Bit0: Attitude, Bit1: GPS, Bit2 Gyro
+            unused2to8 : {0, 0, 0, 0, 0, 0, 0},
+            roll_be: htobe16(AP::ahrs().get_roll_rad() * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT),      // vehicle roll angle.  1bit=360deg/65536
+            pitch_be: htobe16(-AP::ahrs().get_pitch_rad() * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT),   // vehicle pitch angle.  1bit=360deg/65536
+            yaw_be: htobe16(veh_yaw_rad * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT),                          // vehicle yaw angle.  1bit=360deg/65536
+            date_be: htobe16(date),                 // bit0~6:year, bit7~10:month, bit11~15:day
+            seconds_utc: {uint8_t((second_hundredths & 0xFF0000ULL) >> 16), // seconds * 100 MSB.  1bit = 0.01sec
+                          uint8_t((second_hundredths & 0xFF00ULL) >> 8),    // seconds * 100 next MSB.  1bit = 0.01sec
+                          uint8_t(second_hundredths & 0xFFULL)},            // seconds * 100 LSB.  1bit = 0.01sec
+            gps_yaw_be: htobe16(vel_yaw_rad * AP_MOUNT_VIEWPRO_RAD_TO_OUTPUT),  // GPS yaw
+            position_mark_bitmask: 0x0F,            // bit0:new position, bit1:clock fix calced, bit2:horiz calced, bit3:alt calced
+            latitude_be: htobe32(loc.lat),          // latitude.  1bit = 10e-7
+            longitude_be: htobe32(loc.lng),         // longitude.  1bit = 10e-7
+            height_be: htobe32(alt_amsl_cm * 10),   // height.  1bit = 1mm
+            ground_speed_N_be: htobe16(vel_NED.x * 100),    // ground speed in North direction. 1bit = 0.01m/s
+            ground_speed_E_be: htobe16(vel_NED.y * 100),    // ground speed in East direction. 1bit = 0.01m/s
+            vdop_be: htobe16(gps_vdop),             // GPS vdop. 1bit = 0.01
+            ground_speed_D_be: htobe16(vel_NED.z * 100)     // speed downwards. 1bit = 0.01m/s
+        }
+    };
 
     // send packet to gimbal
     return send_packet(mahrs_packet.bytes, sizeof(mahrs_packet.bytes));
@@ -606,7 +671,7 @@ bool AP_Mount_Viewpro::take_picture()
         return false;
     }
 
-    return send_camera_command(CameraCommand::TAKE_PICTURE, 0);
+    return send_camera_command(_image_sensor, CameraCommand::TAKE_PICTURE, 0);
 }
 
 // start or stop video recording.  returns true on success
@@ -618,13 +683,7 @@ bool AP_Mount_Viewpro::record_video(bool start_recording)
         return false;
     }
 
-    if (!send_camera_command(start_recording ? CameraCommand::START_RECORD : CameraCommand::STOP_RECORD, 0)) {
-        return false;
-    }
-
-    gcs().send_text(MAV_SEVERITY_INFO, "%s recording %s", send_text_prefix, start_recording ? "ON": "OFF");
-    _last_record_video = start_recording;
-    return true;
+    return send_camera_command(_image_sensor, start_recording ? CameraCommand::START_RECORD : CameraCommand::STOP_RECORD, 0);
 }
 
 // set zoom specified as a rate or percentage
@@ -637,13 +696,32 @@ bool AP_Mount_Viewpro::set_zoom(ZoomType zoom_type, float zoom_value)
 
     // zoom rate
     if (zoom_type == ZoomType::RATE) {
+        uint8_t zoom_speed = 1;
         CameraCommand zoom_cmd = CameraCommand::STOP_FOCUS_AND_ZOOM;
-        if (zoom_value < 0) {
-            zoom_cmd = CameraCommand::ZOOM_OUT;
-        } else if (zoom_value > 0) {
-            zoom_cmd = CameraCommand::ZOOM_IN;
+        
+        switch (_image_sensor) {
+            default:   
+            case ImageSensor::EO1:
+            case ImageSensor::EO1_IR_PIP:
+                if (zoom_value < 0) {
+                    zoom_cmd = CameraCommand::ZOOM_OUT;
+                } else if (zoom_value > 0) {
+                    zoom_cmd = CameraCommand::ZOOM_IN;
+                }
+                zoom_speed = AP_MOUNT_VIEWPRO_EO_ZOOM_SPEED;
+                break;
+            case ImageSensor::IR:
+            case ImageSensor::IR_EO1_PIP:
+                if (zoom_value < 0) {
+                    zoom_cmd = CameraCommand::IR_ZOOM_IN;
+                } else if (zoom_value > 0) {
+                    zoom_cmd = CameraCommand::IR_ZOOM_OUT;
+                }
+                zoom_speed = AP_MOUNT_VIEWPRO_IR_ZOOM_SPEED;
+                break;    
         }
-        return send_camera_command(zoom_cmd, AP_MOUNT_VIEWPRO_ZOOM_SPEED);
+        
+        return send_camera_command(_image_sensor, zoom_cmd, zoom_speed);
     }
 
     // zoom percentage
@@ -673,7 +751,7 @@ SetFocusResult AP_Mount_Viewpro::set_focus(FocusType focus_type, float focus_val
         } else if (focus_value > 0) {
             focus_cmd = CameraCommand::FOCUS_PLUS;
         }
-        if (!send_camera_command(focus_cmd, 0)) {
+        if (!send_camera_command(_image_sensor, focus_cmd, 0)) {
             return SetFocusResult::FAILED;
         }
         return SetFocusResult::ACCEPTED;
@@ -682,7 +760,7 @@ SetFocusResult AP_Mount_Viewpro::set_focus(FocusType focus_type, float focus_val
         // not supported
         return SetFocusResult::INVALID_PARAMETERS;
     case FocusType::AUTO:
-        if (!send_camera_command(CameraCommand::AUTO_FOCUS, 0)) {
+        if (!send_camera_command(_image_sensor, CameraCommand::AUTO_FOCUS, 0)) {
             return SetFocusResult::FAILED;
         }
         return SetFocusResult::ACCEPTED;
@@ -708,13 +786,13 @@ bool AP_Mount_Viewpro::set_tracking(TrackingType tracking_type, const Vector2f& 
         break;
     case TrackingType::TRK_POINT: {
         return (send_tracking_command(TrackingCommand::START, 0) &&
-                send_tracking_command2(TrackingCommand2::SET_POINT, (p1.x - 0.5) * 960, (p1.y - 0.5) * 540));
+                send_tracking_command2(TrackingCommand2::SET_POINT, (p1.x - 0.5) * 2.0 * 960, (p1.y - 0.5) * 2.0 * 540));
         break;
     }
     case TrackingType::TRK_RECTANGLE:
         return (send_tracking_command(TrackingCommand::START, 0) &&
-                send_tracking_command2(TrackingCommand2::SET_RECT_TOPLEFT, (p1.x - 0.5) * 960, (p1.y - 0.5) * 540) &&
-                send_tracking_command2(TrackingCommand2::SET_RECT_BOTTOMRIGHT, (p2.x - 0.5) * 960, (p2.y - 0.5) * 540));
+                send_tracking_command2(TrackingCommand2::SET_RECT_TOPLEFT, (p1.x - 0.5) * 2.0 * 960, (p1.y - 0.5) * 2.0 * 540) &&
+                send_tracking_command2(TrackingCommand2::SET_RECT_BOTTOMRIGHT, (p2.x - 0.5) * 2.0 * 960, (p2.y - 0.5) * 2.0 * 540));
         break;
     }
 
@@ -722,42 +800,64 @@ bool AP_Mount_Viewpro::set_tracking(TrackingType tracking_type, const Vector2f& 
     return false;
 }
 
-// send camera information message to GCS
-void AP_Mount_Viewpro::send_camera_information(mavlink_channel_t chan) const
+// set camera lens as a value from 0 to 5
+bool AP_Mount_Viewpro::set_lens(uint8_t lens)
 {
     // exit immediately if not initialised
     if (!_initialised) {
-        return;
+        return false;
     }
 
-    static const uint8_t vendor_name[32] = "Viewpro";
-    static uint8_t model_name[32] = "Unknown";
-    const char cam_definition_uri[140] {};
+    // match lens to ImageSensor enum values and sanity check
+    lens++;
+    if (lens > (uint8_t)ImageSensor::IR2_52MM) {
+        return false;
+    }
 
-    // capability flags
-    const uint32_t flags = CAMERA_CAP_FLAGS_CAPTURE_VIDEO |
-                           CAMERA_CAP_FLAGS_CAPTURE_IMAGE |
-                           CAMERA_CAP_FLAGS_HAS_BASIC_ZOOM |
-                           CAMERA_CAP_FLAGS_HAS_BASIC_FOCUS |
-                           CAMERA_CAP_FLAGS_HAS_TRACKING_POINT |
-                           CAMERA_CAP_FLAGS_HAS_TRACKING_RECTANGLE;
+    // if lens is zero use default lens
+    ImageSensor new_image_sensor = ImageSensor(lens);
+    return send_camera_command(new_image_sensor, CameraCommand::NO_ACTION, 0);
+}
 
-    // send CAMERA_INFORMATION message
-    mavlink_msg_camera_information_send(
-        chan,
-        AP_HAL::millis(),       // time_boot_ms
-        vendor_name,            // vendor_name uint8_t[32]
-        model_name,             // model_name uint8_t[32]
-        0,                      // firmware version uint32_t
-        0,                      // focal_length float (mm)
-        0,                      // sensor_size_h float (mm)
-        0,                      // sensor_size_v float (mm)
-        0,                      // resolution_h uint16_t (pix)
-        0,                      // resolution_v uint16_t (pix)
-        0,                      // lens_id uint8_t
-        flags,                  // flags uint32_t (CAMERA_CAP_FLAGS)
-        0,                      // cam_definition_version uint16_t
-        cam_definition_uri);    // cam_definition_uri char[140]
+// set_camera_source is functionally the same as set_lens except primary and secondary lenses are specified by type
+// primary and secondary sources use the AP_Camera::CameraSource enum cast to uint8_t
+bool AP_Mount_Viewpro::set_camera_source(uint8_t primary_source, uint8_t secondary_source)
+{
+    // maps primary and secondary source to viewpro image sensor
+    ImageSensor new_image_sensor;
+    switch (primary_source) {
+    case 0: // Default (RGB)
+        FALLTHROUGH;
+    case 1: // RGB
+        switch (secondary_source) {
+        case 0: // RGB + Default (None)
+            new_image_sensor = ImageSensor::EO1;
+            break;
+        case 2: // PIP RGB+IR
+            new_image_sensor = ImageSensor::EO1_IR_PIP;
+            break;
+        default:
+            return false;
+        }
+        break;
+    case 2: // IR
+        switch (secondary_source) {
+        case 0: // IR + Default (None)
+            new_image_sensor = ImageSensor::IR;
+            break;
+        case 1: // PIP IR+RGB
+            new_image_sensor = ImageSensor::IR_EO1_PIP;
+            break;
+        default:
+            return false;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    // send desired image type to camera
+    return send_camera_command(new_image_sensor, CameraCommand::NO_ACTION, 0);
 }
 
 // send camera settings message to GCS
@@ -768,15 +868,35 @@ void AP_Mount_Viewpro::send_camera_settings(mavlink_channel_t chan) const
         return;
     }
 
-    const float NaN = nanf("0x4152");
+    // convert zoom times (e.g. 1x ~ 20x) to target zoom level (e.g. 0 to 100)
+    const float zoom_level = linear_interpolate(0, 100, _zoom_times, 1, AP_MOUNT_VIEWPRO_ZOOM_MAX);
 
     // send CAMERA_SETTINGS message
     mavlink_msg_camera_settings_send(
         chan,
         AP_HAL::millis(),   // time_boot_ms
-        _last_record_video ? CAMERA_MODE_VIDEO : CAMERA_MODE_IMAGE, // camera mode (0:image, 1:video, 2:image survey)
-        NaN,                // zoomLevel float, percentage from 0 to 100, NaN if unknown
-        NaN);               // focusLevel float, percentage from 0 to 100, NaN if unknown
+        _recording ? CAMERA_MODE_VIDEO : CAMERA_MODE_IMAGE, // camera mode (0:image, 1:video, 2:image survey)
+        zoom_level,         // zoomLevel float, percentage from 0 to 100, NaN if unknown
+        NaNf);              // focusLevel float, percentage from 0 to 100, NaN if unknown
+}
+
+// get rangefinder distance.  Returns true on success
+bool AP_Mount_Viewpro::get_rangefinder_distance(float& distance_m) const
+{
+    // if not healthy or zero distance return false
+    // healthy() checks attitude timeout which is in same message as rangefinder distance
+    if (!healthy()) {
+        return false;
+    }
+
+    distance_m = _rangefinder_dist_m;
+    return true;
+}
+
+// enable/disable rangefinder.  Returns true on success
+bool AP_Mount_Viewpro::set_rangefinder_enable(bool enable)
+{
+    return send_camera_command(ImageSensor::NO_ACTION, CameraCommand::NO_ACTION, 0, enable ? LRFCommand::CONTINUOUS_RANGING_START : LRFCommand::STOP_RANGING);
 }
 
 #endif // HAL_MOUNT_VIEWPRO_ENABLED

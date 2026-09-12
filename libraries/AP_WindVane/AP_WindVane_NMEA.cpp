@@ -13,6 +13,10 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_WindVane_config.h"
+
+#if AP_WINDVANE_NMEA_ENABLED
+
 #include <AP_HAL/AP_HAL.h>
 #include "AP_WindVane_NMEA.h"
 #include <AP_SerialManager/AP_SerialManager.h>
@@ -125,7 +129,10 @@ bool AP_WindVane_NMEA::decode_latest_term()
     // handle the last term in a message
     if (_term_is_checksum) {
         _sentence_done = true;
-        uint8_t checksum = 16 * char_to_hex(_term[0]) + char_to_hex(_term[1]);
+        uint8_t checksum;
+        if (!hex_twochars_to_uint8(_term, checksum)) {
+            return false;
+        }
         return ((checksum == _checksum) && _sentence_valid);
     }
 
@@ -197,3 +204,5 @@ bool AP_WindVane_NMEA::decode_latest_term()
     }
     return false;
 }
+
+#endif  // AP_WINDVANE_NMEA_ENABLED

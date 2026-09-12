@@ -27,13 +27,7 @@
 
 #pragma once
 
-#include <AP_HAL/AP_HAL_Boards.h>
 #include "AP_OpenDroneID_config.h"
-
-#ifndef AP_OPENDRONEID_ENABLED
-// default to off. Enabled in hwdef.dat
-#define AP_OPENDRONEID_ENABLED 0
-#endif
 
 #if AP_OPENDRONEID_ENABLED
 
@@ -117,9 +111,9 @@ private:
     char id_type[3];
     size_t id_len;
     char id_str[21];
-
+    bool bootloader_flashed;
     enum Options : int16_t {
-        EnforceArming     = (1U << 0U),
+        EnforcePreArmChecks = (1U << 0U),
         AllowNonGPSPosition = (1U << 1U),
         LockUASIDOnFirstBasicIDRx = (1U << 2U),
     };
@@ -135,8 +129,8 @@ private:
     uint32_t _last_send_location_ms;
     uint32_t _last_send_system_update_ms;
     uint32_t _last_send_static_messages_ms;
-    const uint32_t _mavlink_dynamic_period_ms = 1000; //how often are mavlink dynamic messages sent in ms. E.g. 1000 = 1 Hz
-    const uint32_t _mavlink_static_period_ms = 3000; //how often are mavlink static messages sent in ms
+    static constexpr uint32_t _mavlink_dynamic_period_ms = 1000; //how often are mavlink dynamic messages sent in ms. E.g. 1000 = 1 Hz
+    static constexpr uint32_t _mavlink_static_period_ms = 3000; //how often are mavlink static messages sent in ms
 
     bool     _have_height_above_takeoff;
     Location _takeoff_location;
@@ -190,8 +184,8 @@ private:
     MAV_ODID_SPEED_ACC create_enum_speed_accuracy(float Accuracy) const;
     MAV_ODID_TIME_ACC create_enum_timestamp_accuracy(float Accuracy) const;
     uint16_t create_direction(uint16_t direction) const;
-    uint16_t create_speed_horizontal(uint16_t speed) const;
-    int16_t create_speed_vertical(int16_t speed) const;
+    float create_speed_horizontal(float speed) const;
+    float create_speed_vertical(float speed) const;
     float create_altitude(float altitude) const;
     float create_location_timestamp(float timestamp) const;
 

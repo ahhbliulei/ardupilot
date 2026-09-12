@@ -16,7 +16,6 @@
 
 #if AP_BARO_BMP085_ENABLED
 
-#include <utility>
 #include <stdio.h>
 
 #include <AP_Common/AP_Common.h>
@@ -36,19 +35,14 @@ extern const AP_HAL::HAL &hal;
 #define OVERSAMPLING BMP085_OVERSAMPLING_HIGHRES
 #endif
 
-AP_Baro_BMP085::AP_Baro_BMP085(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev)
+AP_Baro_BMP085::AP_Baro_BMP085(AP_Baro &baro, AP_HAL::Device &dev)
     : AP_Baro_Backend(baro)
-    , _dev(std::move(dev))
+    , _dev(&dev)
 { }
 
-AP_Baro_Backend * AP_Baro_BMP085::probe(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> dev)
+AP_Baro_Backend * AP_Baro_BMP085::probe(AP_Baro &baro, AP_HAL::Device &dev)
 {
-
-    if (!dev) {
-        return nullptr;
-    }
-
-    AP_Baro_BMP085 *sensor = new AP_Baro_BMP085(baro, std::move(dev));
+    AP_Baro_BMP085 *sensor = NEW_NOTHROW AP_Baro_BMP085(baro, dev);
     if (!sensor || !sensor->_init()) {
         delete sensor;
         return nullptr;
@@ -70,7 +64,7 @@ bool AP_Baro_BMP085::_init()
     // get pointer to i2c bus semaphore
     AP_HAL::Semaphore *sem = _dev->get_semaphore();
 
-    // take i2c bus sempahore
+    // take i2c bus semaphore
     WITH_SEMAPHORE(sem);
 
     if (BMP085_EOC >= 0) {
@@ -177,7 +171,7 @@ bool AP_Baro_BMP085::_read_prom(uint16_t *prom)
 }
 
 /*
-  This is a state machine. Acumulate a new sensor reading.
+  This is a state machine. Accumulate a new sensor reading.
  */
 void AP_Baro_BMP085::_timer(void)
 {

@@ -43,6 +43,7 @@ const AP_Param::GroupInfo AP_Button::var_info[] = {
     // @Description: Digital pin number for first button input.  Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot.
     // @User: Standard
     // @Values: -1:Disabled,50:AUXOUT1,51:AUXOUT2,52:AUXOUT3,53:AUXOUT4,54:AUXOUT5,55:AUXOUT6
+    // @Range: -1 127
     AP_GROUPINFO("PIN1",  1, AP_Button, pin[0], -1),
 
     // @Param: PIN2
@@ -50,6 +51,7 @@ const AP_Param::GroupInfo AP_Button::var_info[] = {
     // @Description: Digital pin number for second button input.  Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot.
     // @User: Standard
     // @Values: -1:Disabled,50:AUXOUT1,51:AUXOUT2,52:AUXOUT3,53:AUXOUT4,54:AUXOUT5,55:AUXOUT6
+    // @Range: -1 127
     AP_GROUPINFO("PIN2",  2, AP_Button, pin[1], -1),
 
     // @Param: PIN3
@@ -57,6 +59,7 @@ const AP_Param::GroupInfo AP_Button::var_info[] = {
     // @Description: Digital pin number for third button input.  Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot.
     // @User: Standard
     // @Values: -1:Disabled,50:AUXOUT1,51:AUXOUT2,52:AUXOUT3,53:AUXOUT4,54:AUXOUT5,55:AUXOUT6
+    // @Range: -1 127
     AP_GROUPINFO("PIN3",  3, AP_Button, pin[2], -1),
 
     // @Param: PIN4
@@ -64,6 +67,7 @@ const AP_Param::GroupInfo AP_Button::var_info[] = {
     // @Description: Digital pin number for fourth button input. Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot.
     // @User: Standard
     // @Values: -1:Disabled,50:AUXOUT1,51:AUXOUT2,52:AUXOUT3,53:AUXOUT4,54:AUXOUT5,55:AUXOUT6
+    // @Range: -1 127
     AP_GROUPINFO("PIN4",  4, AP_Button, pin[3], -1),
 
     // @Param: REPORT_SEND
@@ -212,6 +216,7 @@ void AP_Button::update(void)
         pwm_start_debounce_ms = now_ms;
     }
 
+#if HAL_GCS_ENABLED
     if (last_debounce_ms != 0 &&
         (AP_HAL::millis() - last_report_ms) > AP_BUTTON_REPORT_PERIOD_MS &&
         (AP_HAL::millis64() - last_debounce_ms) < report_send_time*1000ULL) {
@@ -221,6 +226,7 @@ void AP_Button::update(void)
         // send a report to GCS
         send_report();
     }
+#endif
 
     if (!aux_functions_initialised) {
         run_aux_functions(true);
@@ -273,10 +279,10 @@ void AP_Button::run_aux_functions(bool force)
 #if AP_RC_CHANNEL_AUX_FUNCTION_STRINGS_ENABLED
         const char *str = rc_channel->string_for_aux_function(func);
         if (str != nullptr) {
-            gcs().send_text(MAV_SEVERITY_INFO, "Button %i: executing (%s %s)", i+1, str, rc_channel->string_for_aux_pos(pos));
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Button %i: executing (%s %s)", i+1, str, rc_channel->string_for_aux_pos(pos));
         }
 #endif
-        rc_channel->run_aux_function(func, pos, RC_Channel::AuxFuncTriggerSource::BUTTON);
+        rc_channel->run_aux_function(func, pos, RC_Channel::AuxFuncTrigger::Source::BUTTON, i);
     }
 }
 
@@ -338,6 +344,7 @@ void AP_Button::timer_update(void)
     }
 }
 
+#if HAL_GCS_ENABLED
 /*
   send a BUTTON_CHANGE report to the GCS
  */
@@ -352,6 +359,7 @@ void AP_Button::send_report(void) const
     gcs().send_to_active_channels(MAVLINK_MSG_ID_BUTTON_CHANGE,
                                   (const char *)&packet);
 }
+#endif
 
 /*
   setup the pins as input with pullup. We need pullup to give reliable

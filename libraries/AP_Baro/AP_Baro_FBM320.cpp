@@ -20,7 +20,6 @@
 
 #if AP_BARO_FBM320_ENABLED
 
-#include <utility>
 #include <stdio.h>
 #include <AP_Math/definitions.h>
 
@@ -35,20 +34,15 @@ extern const AP_HAL::HAL &hal;
 
 #define FBM320_WHOAMI 0x42
 
-AP_Baro_FBM320::AP_Baro_FBM320(AP_Baro &baro, AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+AP_Baro_FBM320::AP_Baro_FBM320(AP_Baro &baro, AP_HAL::Device &_dev)
     : AP_Baro_Backend(baro)
-    , dev(std::move(_dev))
+    , dev(&_dev)
 {
 }
 
-AP_Baro_Backend *AP_Baro_FBM320::probe(AP_Baro &baro,
-                                       AP_HAL::OwnPtr<AP_HAL::Device> _dev)
+AP_Baro_Backend *AP_Baro_FBM320::probe(AP_Baro &baro, AP_HAL::Device &_dev)
 {
-    if (!_dev) {
-        return nullptr;
-    }
-
-    AP_Baro_FBM320 *sensor = new AP_Baro_FBM320(baro, std::move(_dev));
+    AP_Baro_FBM320 *sensor = NEW_NOTHROW AP_Baro_FBM320(baro, _dev);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -179,7 +173,7 @@ void AP_Baro_FBM320::calculate_PT(int32_t UT, int32_t UP, int32_t &pressure, int
     pressure = ((X31 + X32) >> 15) + PP4 + 99880;
 }
 
-//  acumulate a new sensor reading
+//  accumulate a new sensor reading
 void AP_Baro_FBM320::timer(void)
 {
     uint8_t buf[3];

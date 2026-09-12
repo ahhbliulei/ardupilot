@@ -3,6 +3,9 @@
 --
 -- CAUTION: This script only works for Plane
 
+---@diagnostic disable: cast-local-type
+---@diagnostic disable: undefined-global
+
 -- store the batt info as { instance, filtered, capacity, margin_mah }
 -- instance: the battery monitor instance (zero indexed)
 -- filtered: internal variable for current draw
@@ -30,29 +33,25 @@ local SITL_wind = false
 
 
 -- Read in required params
-local value = param:get('TRIM_ARSPD_CM')
+local value = param:get('AIRSPEED_CRUISE')
 if value then
-  air_speed = value / 100
+  air_speed = value
 else
-  error('LUA: get TRIM_ARSPD_CM failed')
+  error('LUA: get AIRSPEED_CRUISE failed')
 end
-value = param:get('ARSPD_FBW_MIN')
+value = param:get('AIRSPEED_MIN')
 if value then
   min_air_speed = value
 else
-  error('LUA: get ARSPD_FBW_MIN failed')
+  error('LUA: get AIRSPEED_MIN failed')
 end
-value = param:get('MIN_GNDSPD_CM')
-if value then
-  min_ground_speed = value / 100
-else
-  error('LUA: get MIN_GNDSPD_CM failed')
+min_ground_speed = param:get('MIN_GROUNDSPEED')
+if not min_groundspeed then
+  error('LUA: get MIN_GROUNDSPEED failed')
 end
-value = param:get('LIM_ROLL_CD')
-if value then
-  max_bank_angle = value / 100
-else
-  error('LUA: get LIM_ROLL_CD failed')
+max_bank_angle = param:get('ROLL_LIMIT_DEG')
+if not max_bank_angle then
+  error('LUA: get ROLL_LIMIT_DEG failed')
 end
 
 -- https://en.wikipedia.org/wiki/Standard_rate_turn#Radius_of_turn_formula
@@ -65,7 +64,7 @@ value = param:get('RTL_RADIUS')
 if value then
   value = math.abs(value)
   if value > 0 then
-    home_reached_rad = math.abs(value) * 2
+    home_reached_rad = value * 2
   else 
     value = param:get('WP_LOITER_RAD')
     if value then
@@ -93,7 +92,7 @@ local timer_active = true
 local function time_to_home()
   local home = ahrs:get_home()
   local position = ahrs:get_location()
-  local wind = ahrs:wind_estimate()
+  local wind = ahrs:get_wind()
 
   if home and position and wind then
     local bearing = position:get_bearing(home)
@@ -136,7 +135,7 @@ local function time_to_home()
     local effective_speed = home_airspeed + tail_wind
 
     -- Estimate the extra distance required to turn
-    local yaw = ahrs:get_yaw()
+    local yaw = ahrs:get_yaw_rad()
     -- this is the estimated angle we have to turn to be at the home bearing and crab angle
     local turn_angle_rad = bearing - crab_angle - yaw 
     -- wrap to +- PI
@@ -301,7 +300,7 @@ function update()
   end
 
   -- check airspeed
-  local air_speed_in = ahrs:airspeed_estimate()
+  local air_speed_in = ahrs:airspeed_EAS()
   if not air_speed_in then
     error("Could not read airspeed")
   end

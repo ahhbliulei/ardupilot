@@ -24,9 +24,6 @@
 #include <AP_Math/AP_Math.h>
 #include "AP_RPM_Params.h"
 
-// Maximum number of RPM measurement instances available on this platform
-#define RPM_MAX_INSTANCES 2
-
 class AP_RPM_Backend;
 
 class AP_RPM
@@ -56,6 +53,9 @@ public:
 #endif
 #if AP_RPM_GENERATOR_ENABLED
         RPM_TYPE_GENERATOR  = 6,
+#endif
+#if AP_RPM_DRONECAN_ENABLED
+        RPM_TYPE_DRONECAN = 7,
 #endif
 #if AP_RPM_SIM_ENABLED
         RPM_TYPE_SITL   = 10,
@@ -107,9 +107,12 @@ public:
     // check settings are valid
     bool arming_checks(size_t buflen, char *buffer) const;
 
-private:
-    void convert_params(void);
+#if AP_RPM_STREAM_ENABLED
+    // Return the sensor id to use for streaming over DroneCAN, negative number disables
+    int8_t get_dronecan_sensor_id(uint8_t instance) const;
+#endif
 
+private:
     static AP_RPM *_singleton;
 
     RPM_State state[RPM_MAX_INSTANCES];

@@ -1,9 +1,8 @@
-#include <AP_HAL/AP_HAL.h>
-
 #include "AP_NavEKF2_core.h"
 
-extern const AP_HAL::HAL& hal;
+#include "AP_NavEKF2.h"
 
+#include <AP_DAL/AP_DAL.h>
 
 /* Monitor GPS data to see if quality is good enough to initialise the EKF
    Monitor magnetometer innovations to see if the heading is good enough to use GPS
@@ -312,7 +311,7 @@ void NavEKF2_core::detectFlight()
         bool largeHgtChange = false;
 
         // trigger at 8 m/s airspeed
-        if (dal.airspeed_sensor_enabled()) {
+        if (useAirspeed()) {
             const auto *airspeed = dal.airspeed();
             if (airspeed->get_airspeed() * dal.get_EAS2TAS() > 10.0f) {
                 highAirSpd = true;

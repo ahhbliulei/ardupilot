@@ -1,8 +1,10 @@
+#include "AP_NavEKF2_core.h"
+
 #include <AP_HAL/AP_HAL.h>
+#include <AP_DAL/AP_DAL.h>
+#include <GCS_MAVLink/GCS.h>
 
 #include "AP_NavEKF2.h"
-#include "AP_NavEKF2_core.h"
-#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -28,10 +30,13 @@ extern const AP_HAL::HAL& hal;
  */
 #define ENABLE_EKF_TIMING 0
 
+NavEKF2_core::Matrix24 NavEKF2_core::KH;
+NavEKF2_core::Matrix24 NavEKF2_core::nextP;
+
 // constructor
 NavEKF2_core::NavEKF2_core(NavEKF2 *_frontend) :
-    frontend(_frontend),
-    dal(AP::dal())
+    dal(AP::dal()),
+    frontend(_frontend)
 {
 }
 
@@ -99,7 +104,7 @@ bool NavEKF2_core::setup_core(uint8_t _imu_index, uint8_t _core_index)
         }
 
         // try to instantiate
-        yawEstimator = new EKFGSF_yaw();
+        yawEstimator = NEW_NOTHROW EKFGSF_yaw();
         if (yawEstimator == nullptr) {
             GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "EKF2 IMU%uGSF: allocation failed",(unsigned)imu_index);
             return false;
@@ -145,9 +150,8 @@ void NavEKF2_core::InitialiseVariables()
     lastGpsAidBadTime_ms = 0;
     timeTasReceived_ms = 0;
     lastPreAlignGpsCheckTime_ms = imuSampleTime_ms;
-    lastPosReset_ms = 0;
-    lastVelReset_ms = 0;
-    lastPosResetD_ms = 0;
+    posNEResetCount = 0;
+    posDResetCount = 0;
     lastRngMeasTime_ms = 0;
 
     // initialise other variables
@@ -195,8 +199,7 @@ void NavEKF2_core::InitialiseVariables()
     gpsHgtAccuracy = 0.0f;
     baroHgtOffset = 0.0f;
     rngOnGnd = 0.05f;
-    yawResetAngle = 0.0f;
-    lastYawReset_ms = 0;
+    yawResetCount = 0;
     tiltErrFilt = 1.0f;
     tiltAlignComplete = false;
     stateIndexLim = 23;
@@ -227,7 +230,6 @@ void NavEKF2_core::InitialiseVariables()
     airSpdFusionDelayed = false;
     sideSlipFusionDelayed = false;
     posResetNE.zero();
-    velResetNE.zero();
     posResetD = 0.0f;
     hgtInnovFiltState = 0.0f;
 
@@ -243,9 +245,11 @@ void NavEKF2_core::InitialiseVariables()
     delAngBiasLearned = false;
     memset(&filterStatus, 0, sizeof(filterStatus));
     activeHgtSource = 0;
+#if AP_RANGEFINDER_ENABLED
     memset(&rngMeasIndex, 0, sizeof(rngMeasIndex));
     memset(&storedRngMeasTime_ms, 0, sizeof(storedRngMeasTime_ms));
     memset(&storedRngMeas, 0, sizeof(storedRngMeas));
+#endif
     terrainHgtStable = true;
     ekfOriginHgtVar = 0.0f;
     ekfGpsRefHgt = 0.0;
@@ -370,7 +374,7 @@ void NavEKF2_core::InitialiseVariablesMag()
 bool NavEKF2_core::InitialiseFilterBootstrap(void)
 {
     // If we are a plane and don't have GPS lock then don't initialise
-    if (assume_zero_sideslip() && dal.gps().status(dal.gps().primary_sensor()) < AP_DAL_GPS::GPS_OK_FIX_3D) {
+    if (assume_zero_sideslip() && dal.gps().status(dal.gps().primary_sensor()) < AP_GPS_FixType::FIX_3D) {
         dal.snprintf(prearm_fail_string,
                            sizeof(prearm_fail_string),
                            "EKF2 init failure: No GPS lock");
@@ -539,6 +543,10 @@ void NavEKF2_core::UpdateFilter(bool predict)
 #endif
 
     fill_scratch_variables();
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    fill_nanf(&KH[0][0], sizeof(KH)/sizeof(ftype)); // see fill_scratch_variables()
+    fill_nanf(&nextP[0][0], sizeof(nextP)/sizeof(ftype));
+#endif
 
     // TODO - in-flight restart method
 
@@ -1607,15 +1615,8 @@ QuaternionF NavEKF2_core::calcQuatAndFieldStates(ftype roll, ftype pitch)
         yaw = magDecAng - magHeading;
 
         // calculate initial filter quaternion states using yaw from magnetometer
-        // store the yaw change so that it can be retrieved externally for use by the control loops to prevent yaw disturbances following a reset
-        Vector3F tempEuler;
-        stateStruct.quat.to_euler(tempEuler.x, tempEuler.y, tempEuler.z);
-        // this check ensures we accumulate the resets that occur within a single iteration of the EKF
-        if (imuSampleTime_ms != lastYawReset_ms) {
-            yawResetAngle = 0.0f;
-        }
-        yawResetAngle += wrap_PI(yaw - tempEuler.z);
-        lastYawReset_ms = imuSampleTime_ms;
+        // record the reset so that it can be detected externally for use by the control loops to prevent yaw disturbances following a reset
+        yawResetCount++;
         // calculate an initial quaternion using the new yaw value
         initQuat.from_euler(roll, pitch, yaw);
         // zero the attitude covariances because the corelations will now be invalid

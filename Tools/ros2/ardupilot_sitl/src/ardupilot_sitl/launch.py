@@ -14,22 +14,26 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """Launch actions for ArduPilot."""
-from typing import List
+from pathlib import Path
 from typing import Dict
+from typing import List
 from typing import Text
 from typing import Tuple
 
 from launch import LaunchContext
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess
 from launch.actions import DeclareLaunchArgument
+from launch.actions import ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
-
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-from .actions import ExecuteFunction
+from ardupilot_sitl.actions import ExecuteFunction
+
+TRUE_STRING = "True"
+FALSE_STRING = "False"
+BOOL_STRING_CHOICES = set([TRUE_STRING, FALSE_STRING])
 
 
 class VirtualPortsLaunch:
@@ -54,6 +58,7 @@ class VirtualPortsLaunch:
         action = ExecuteProcess(
             cmd=[
                 [
+                    "exec ",  # take place of shell so socat gets signals
                     "socat ",
                     "-d -d ",
                     f"pty,raw,echo=0,link={tty0} ",
@@ -68,9 +73,7 @@ class VirtualPortsLaunch:
         return action
 
     @staticmethod
-    def generate_launch_description_with_actions() -> (
-        Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]
-    ):
+    def generate_launch_description_with_actions() -> Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]:
         """Generate a launch description with actions."""
         launch_arguments = VirtualPortsLaunch.generate_launch_arguments()
 
@@ -144,6 +147,8 @@ class MicroRosAgentLaunch:
             transport,
             "--middleware",
             middleware,
+            "--verbose",
+            verbose,
         ]
 
         if transport in ["udp4", "udp6", "tcp4", "tcp6"]:
@@ -186,9 +191,7 @@ class MicroRosAgentLaunch:
         return node
 
     @staticmethod
-    def generate_launch_description_with_actions() -> (
-        Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]
-    ):
+    def generate_launch_description_with_actions() -> Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]:
         """Generate a launch description with actions."""
         launch_arguments = MicroRosAgentLaunch.generate_launch_arguments()
 
@@ -286,28 +289,39 @@ class MAVProxyLaunch:
 
         # Retrieve launch arguments.
         master = LaunchConfiguration("master").perform(context)
-        # out = LaunchConfiguration("out").perform(context)
+        out = LaunchConfiguration("out").perform(context)
         sitl = LaunchConfiguration("sitl").perform(context)
+        console = LaunchConfiguration("console").perform(context)
+        map = LaunchConfiguration("map").perform(context)
 
         # Display launch arguments.
         print(f"command:          {command}")
         print(f"master:           {master}")
         print(f"sitl:             {sitl}")
+        print(f"out:              {out}")
+        print(f"console:          {console}")
+        print(f"map:              {map}")
+
+        cmd = [
+            "exec ",  # take place of shell so mavproxy (though not its subprocesses!) get signals
+            f"{command} ",
+            f"--out {out} ",
+            "--out ",
+            "127.0.0.1:14551 ",
+            f"--master {master} ",
+            f"--sitl {sitl} ",
+            "--non-interactive ",
+        ]
+
+        if console == TRUE_STRING:
+            cmd.append("--console ")
+
+        if map == TRUE_STRING:
+            cmd.append("--map ")
 
         # Create action.
         mavproxy_process = ExecuteProcess(
-            cmd=[
-                [
-                    f"{command} ",
-                    "--out ",
-                    "127.0.0.1:14550 ",
-                    "--out ",
-                    "127.0.0.1:14551 ",
-                    f"--master {master} ",
-                    f"--sitl {sitl} ",
-                    "--non-interactive ",
-                ]
-            ],
+            cmd=cmd,
             shell=True,
             output="both",
             respawn=False,
@@ -315,9 +329,7 @@ class MAVProxyLaunch:
         return mavproxy_process
 
     @staticmethod
-    def generate_launch_description_with_actions() -> (
-        Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]
-    ):
+    def generate_launch_description_with_actions() -> Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]:
         """Generate a launch description for MAVProxy."""
         launch_arguments = MAVProxyLaunch.generate_launch_arguments()
 
@@ -359,14 +371,18 @@ class MAVProxyLaunch:
                 default_value="127.0.0.1:5501",
                 description="SITL output port.",
             ),
+            DeclareLaunchArgument(
+                "map", default_value="False", description="Enable MAVProxy Map.", choices=BOOL_STRING_CHOICES
+            ),
+            DeclareLaunchArgument(
+                "console", default_value="False", description="Enable MAVProxy Console.", choices=BOOL_STRING_CHOICES
+            ),
         ]
 
 
 class SITLLaunch:
     """Launch functions for ArduPilot SITL."""
 
-    # Labels for the optional uart launch arguments.
-    UART_LABELS = ["A", "B", "C", "D", "E", "F", "H", "I", "J"]
     MAX_SERIAL_PORTS = 10
 
     @staticmethod
@@ -380,6 +396,8 @@ class SITLLaunch:
         sim_address = LaunchConfiguration("sim_address").perform(context)
         instance = LaunchConfiguration("instance").perform(context)
         defaults = LaunchConfiguration("defaults").perform(context)
+        use_instance_dir = LaunchConfiguration("use_instance_dir").perform(context)
+        use_sim_time = LaunchConfiguration("use_sim_time").perform(context)
 
         # Display launch arguments.
         print(f"command:          {command}")
@@ -389,26 +407,33 @@ class SITLLaunch:
         print(f"sim_address:      {sim_address}")
         print(f"instance:         {instance}")
         print(f"defaults:         {defaults}")
+        print(f"use_instance_dir: {use_instance_dir}")
+        print(f"use_sim_time:     {use_sim_time}")
 
         # Required arguments.
         cmd_args = [
-            f"{command} ",
+            # Use 'exec' so the /bin/sh -c wrapper is replaced by the
+            # arducopter process: the launch service then delivers its
+            # shutdown signals (SIGINT/SIGTERM) to arducopter directly
+            # rather than to the shell.
+            f"exec {command} ",
             f"--model {model} ",
             f"--speedup {speedup} ",
             f"--slave {slave} ",
             f"--sim-address={sim_address} ",
             f"--instance {instance} ",
             f"--defaults {defaults} ",
+            f"--use_sim_time {use_sim_time} ",
         ]
 
         # Optional arguments.
         wipe = LaunchConfiguration("wipe").perform(context)
-        if wipe == "True":
+        if wipe == TRUE_STRING:
             cmd_args.append("--wipe ")
             print(f"wipe:             {wipe}")
 
         synthetic_clock = LaunchConfiguration("synthetic_clock").perform(context)
-        if synthetic_clock == "True":
+        if synthetic_clock == TRUE_STRING:
             cmd_args.append("--synthetic-clock ")
             print(f"synthetic_clock:  {synthetic_clock}")
 
@@ -416,13 +441,6 @@ class SITLLaunch:
         if home:
             cmd_args.append(f"--home {home} ")
             print(f"home:             {home}")
-
-        # Optional uart arguments.
-        for label in SITLLaunch.UART_LABELS:
-            arg = LaunchConfiguration(f"uart{label}").perform(context)
-            if arg:
-                cmd_args.append(f"--uart{label} {arg} ")
-                print(f"uart{label}:            {arg}")
 
         # Optional serial arguments.
         for label in range(10):
@@ -476,9 +494,17 @@ class SITLLaunch:
             cmd_args.append(f"--sysid {sysid} ")
             print(f"sysid:            {sysid}")
 
+        cwd = Path.cwd()
+        if use_instance_dir == TRUE_STRING:
+            # Create an instance directory to store eeprom.bin.
+            cwd = cwd / f"{instance}"
+            Path(cwd).mkdir(exist_ok=True)
+            print(f"cwd:              {cwd}")
+
         # Create action.
         sitl_process = ExecuteProcess(
             cmd=[cmd_args],
+            cwd=str(cwd),
             shell=True,
             output="both",
             respawn=False,
@@ -486,9 +512,7 @@ class SITLLaunch:
         return sitl_process
 
     @staticmethod
-    def generate_launch_description_with_actions() -> (
-        Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]
-    ):
+    def generate_launch_description_with_actions() -> Tuple[LaunchDescription, Dict[Text, ExecuteFunction]]:
         """Generate a launch description for SITL."""
         launch_arguments = SITLLaunch.generate_launch_arguments()
 
@@ -553,8 +577,7 @@ class SITLLaunch:
             DeclareLaunchArgument(
                 "instance",
                 default_value="0",
-                description="Set instance of SITL "
-                "(adds 10*instance to all port numbers).",
+                description="Set instance of SITL " "(adds 10*instance to all port numbers).",
             ),
             DeclareLaunchArgument(
                 "defaults",
@@ -573,13 +596,13 @@ class SITLLaunch:
                 "wipe",
                 default_value="False",
                 description="Wipe eeprom.",
-                choices=["True", "False"],
+                choices=BOOL_STRING_CHOICES,
             ),
             DeclareLaunchArgument(
                 "synthetic_clock",
                 default_value="False",
                 description="Set synthetic clock mode.",
-                choices=["True", "False"],
+                choices=BOOL_STRING_CHOICES,
             ),
             DeclareLaunchArgument(
                 "home",
@@ -599,8 +622,7 @@ class SITLLaunch:
             DeclareLaunchArgument(
                 "base_port",
                 default_value="",
-                description="Set port num for base port(default 5670) "
-                "must be before -I option.",
+                description="Set port num for base port(default 5670) " "must be before -I option.",
             ),
             DeclareLaunchArgument(
                 "rc_in_port",
@@ -630,19 +652,21 @@ class SITLLaunch:
             DeclareLaunchArgument(
                 "sysid",
                 default_value="",
-                description="Set SYSID_THISMAV.",
+                description="Set MAV_SYSID.",
+            ),
+            DeclareLaunchArgument(
+                "use_instance_dir",
+                default_value="False",
+                description="If True create instance directories for the eeprom.bin.",
+                choices=BOOL_STRING_CHOICES,
+            ),
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="True",
+                description="Use simulation time.",
+                choices=BOOL_STRING_CHOICES,
             ),
         ]
-
-        # UART launch arguments.
-        uart_args = []
-        for label in SITLLaunch.UART_LABELS:
-            arg = DeclareLaunchArgument(
-                f"uart{label}",
-                default_value="",
-                description=f"set device string for UART{label}.",
-            )
-            uart_args.append(arg)
 
         # Serial launch arguments.
         serial_args = []
@@ -654,4 +678,4 @@ class SITLLaunch:
             )
             serial_args.append(arg)
 
-        return launch_args + uart_args + serial_args
+        return launch_args + serial_args

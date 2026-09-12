@@ -1,7 +1,12 @@
+#include "AP_Mission_config.h"
+
+#if AP_MISSION_ENABLED
+
 #include "AP_Mission.h"
 
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Camera/AP_Camera.h>
+#include <AP_Camera/AP_Camera_Backend.h>
 #include <AP_Gripper/AP_Gripper.h>
 #include <AP_Parachute/AP_Parachute.h>
 #include <AP_ServoRelayEvents/AP_ServoRelayEvents.h>
@@ -9,7 +14,9 @@
 #include <AP_Scripting/AP_Scripting.h>
 #include <RC_Channel/RC_Channel.h>
 #include <AP_Mount/AP_Mount.h>
+#include <AC_Fence/AC_Fence.h>
 
+#if AP_RC_CHANNEL_ENABLED
 bool AP_Mission::start_command_do_aux_function(const AP_Mission::Mission_Command& cmd)
 {
     const RC_Channel::AUX_FUNC function = (RC_Channel::AUX_FUNC)cmd.content.auxfunction.function;
@@ -25,30 +32,28 @@ bool AP_Mission::start_command_do_aux_function(const AP_Mission::Mission_Command
     default:
         return false;
     }
-    rc().run_aux_function(function, pos, RC_Channel::AuxFuncTriggerSource::MISSION);
+    rc().run_aux_function(function, pos, RC_Channel::AuxFuncTrigger::Source::MISSION, cmd.index);
     return true;
 }
+#endif  // AP_RC_CHANNEL_ENABLED
 
 #if AP_GRIPPER_ENABLED
 bool AP_Mission::start_command_do_gripper(const AP_Mission::Mission_Command& cmd)
 {
-    AP_Gripper *gripper = AP::gripper();
-    if (gripper == nullptr) {
-        return false;
-    }
+    AP_Gripper &gripper = AP::gripper();
 
     // Note: we ignore the gripper num parameter because we only
     // support one gripper
     switch (cmd.content.gripper.action) {
     case GRIPPER_ACTION_RELEASE:
-        gripper->release();
+        gripper.release();
         // Log_Write_Event(DATA_GRIPPER_RELEASE);
-        gcs().send_text(MAV_SEVERITY_INFO, "Gripper Released");
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gripper Released");
         return true;
     case GRIPPER_ACTION_GRAB:
-        gripper->grab();
+        gripper.grab();
         // Log_Write_Event(DATA_GRIPPER_GRAB);
-        gcs().send_text(MAV_SEVERITY_INFO, "Gripper Grabbed");
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Gripper Grabbed");
         return true;
     default:
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
@@ -130,41 +135,69 @@ bool AP_Mission::start_command_camera(const AP_Mission::Mission_Command& cmd)
         return true;
 
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:
-        camera->set_trigger_distance(cmd.content.cam_trigg_dist.meters);
-        if (cmd.content.cam_trigg_dist.trigger == 1) {
-            camera->take_picture();
-        }
-        return true;
+        return camera->handle_mav_DO_SET_CAM_TRIGG_DISTANCE(
+            cmd.content.cam_trigg_dist.camera_id,
+            cmd.content.cam_trigg_dist.trigger,
+            cmd.content.cam_trigg_dist.meters
+        ) == MAV_RESULT_ACCEPTED;
 
     case MAV_CMD_SET_CAMERA_ZOOM:
-        if (cmd.content.set_camera_zoom.zoom_type == ZOOM_TYPE_CONTINUOUS) {
-            return camera->set_zoom(ZoomType::RATE, cmd.content.set_camera_zoom.zoom_value);
-        }
-        if (cmd.content.set_camera_zoom.zoom_type == ZOOM_TYPE_RANGE) {
-            return camera->set_zoom(ZoomType::PCT, cmd.content.set_camera_zoom.zoom_value);
-        }
-        return false;
+        return camera->handle_mav_SET_CAMERA_ZOOM(
+            cmd.content.set_camera_zoom.camera_id,
+            (CAMERA_ZOOM_TYPE)cmd.content.set_camera_zoom.zoom_type,
+            cmd.content.set_camera_zoom.zoom_value
+        ) == MAV_RESULT_ACCEPTED;
 
     case MAV_CMD_SET_CAMERA_FOCUS:
-        // accept any of the auto focus types
-        if ((cmd.content.set_camera_focus.focus_type == FOCUS_TYPE_AUTO) ||
-            (cmd.content.set_camera_focus.focus_type == FOCUS_TYPE_AUTO_SINGLE) ||
-            (cmd.content.set_camera_focus.focus_type == FOCUS_TYPE_AUTO_CONTINUOUS)) {
-            return camera->set_focus(FocusType::AUTO, 0) == SetFocusResult::ACCEPTED;
+        return camera->handle_mav_SET_CAMERA_FOCUS(
+            cmd.content.set_camera_focus.camera_id,
+            (SET_FOCUS_TYPE)cmd.content.set_camera_focus.focus_type,
+            cmd.content.set_camera_focus.focus_value
+        ) == MAV_RESULT_ACCEPTED;
+
+#if AP_CAMERA_SET_CAMERA_SOURCE_ENABLED
+    case MAV_CMD_SET_CAMERA_SOURCE:
+        if (cmd.content.set_camera_source.instance == 0) {
+            // set lens for every backend
+            bool ret = false;
+            for (uint8_t i=0; i<AP_CAMERA_MAX_INSTANCES; i++) {
+                ret |= camera->set_camera_source(i, (AP_Camera::CameraSource)cmd.content.set_camera_source.primary_source, (AP_Camera::CameraSource)cmd.content.set_camera_source.secondary_source);
+            }
+            return ret;
         }
-        // accept continuous manual focus
-        if (cmd.content.set_camera_focus.focus_type == FOCUS_TYPE_CONTINUOUS) {
-            return camera->set_focus(FocusType::RATE, cmd.content.set_camera_focus.focus_value) == SetFocusResult::ACCEPTED;
-        }
-        // accept range manual focus
-        if (cmd.content.set_camera_focus.focus_type == FOCUS_TYPE_RANGE) {
-            return camera->set_focus(FocusType::PCT, cmd.content.set_camera_focus.focus_value) == SetFocusResult::ACCEPTED;
-        }
-        return false;
+        return camera->set_camera_source(cmd.content.set_camera_source.instance-1, (AP_Camera::CameraSource)cmd.content.set_camera_source.primary_source, (AP_Camera::CameraSource)cmd.content.set_camera_source.secondary_source);
+#endif
 
     case MAV_CMD_IMAGE_START_CAPTURE:
-        camera->take_picture();
-        return true;
+        // check if this is a single picture request (e.g. total images is 1 or interval and total images are zero)
+        if ((cmd.content.image_start_capture.total_num_images == 1) ||
+            (cmd.content.image_start_capture.total_num_images == 0 && is_zero(cmd.content.image_start_capture.interval_s))) {
+            if (cmd.content.image_start_capture.instance == 0) {
+                // take pictures for every backend
+                return camera->take_picture();
+            }
+            return camera->take_picture(cmd.content.image_start_capture.instance-1);
+        } else if (cmd.content.image_start_capture.total_num_images == 0) {
+            // multiple picture request, take pictures forever
+            if (cmd.content.image_start_capture.instance == 0) {
+                // take pictures for every backend
+                return camera->take_multiple_pictures(cmd.content.image_start_capture.interval_s*1000, -1);
+            }
+            return camera->take_multiple_pictures(cmd.content.image_start_capture.instance-1, cmd.content.image_start_capture.interval_s*1000, -1);
+        } else {
+            if (cmd.content.image_start_capture.instance == 0) {
+                // take pictures for every backend
+                return camera->take_multiple_pictures(cmd.content.image_start_capture.interval_s*1000, cmd.content.image_start_capture.total_num_images);
+            }
+            return camera->take_multiple_pictures(cmd.content.image_start_capture.instance-1, cmd.content.image_start_capture.interval_s*1000, cmd.content.image_start_capture.total_num_images);
+        }
+    case MAV_CMD_IMAGE_STOP_CAPTURE:
+        if (cmd.p1 == 0) {
+            // stop capture for each backend
+            camera->stop_capture();
+            return true;
+        }
+        return camera->stop_capture(cmd.p1 - 1);
 
     case MAV_CMD_VIDEO_START_CAPTURE:
     case MAV_CMD_VIDEO_STOP_CAPTURE:
@@ -220,7 +253,7 @@ bool AP_Mission::start_command_parachute(const AP_Mission::Mission_Command& cmd)
 bool AP_Mission::command_do_set_repeat_dist(const AP_Mission::Mission_Command& cmd)
 {
     _repeat_dist = cmd.p1;
-    gcs().send_text(MAV_SEVERITY_INFO, "Resume repeat dist set to %u m",_repeat_dist);
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Resume repeat dist set to %u m",_repeat_dist);
     return true;
 }
 
@@ -286,8 +319,8 @@ bool AP_Mission::start_command_do_gimbal_manager_pitchyaw(const AP_Mission::Miss
     }
 
     // handle angle target
-    const bool pitch_angle_valid = !isnan(cmd.content.gimbal_manager_pitchyaw.pitch_angle_deg) && (fabsF(cmd.content.gimbal_manager_pitchyaw.pitch_angle_deg) <= 90);
-    const bool yaw_angle_valid = !isnan(cmd.content.gimbal_manager_pitchyaw.yaw_angle_deg) && (fabsF(cmd.content.gimbal_manager_pitchyaw.yaw_angle_deg) <= 360);
+    const bool pitch_angle_valid = abs(cmd.content.gimbal_manager_pitchyaw.pitch_angle_deg) <= 90;
+    const bool yaw_angle_valid = abs(cmd.content.gimbal_manager_pitchyaw.yaw_angle_deg) <= 360;
     if (pitch_angle_valid && yaw_angle_valid) {
         mount->set_angle_target(gimbal_instance, 0, cmd.content.gimbal_manager_pitchyaw.pitch_angle_deg, cmd.content.gimbal_manager_pitchyaw.yaw_angle_deg, cmd.content.gimbal_manager_pitchyaw.flags & GIMBAL_MANAGER_FLAGS_YAW_LOCK);
         return true;
@@ -303,3 +336,55 @@ bool AP_Mission::start_command_do_gimbal_manager_pitchyaw(const AP_Mission::Miss
     // if we got this far then message is not handled
     return false;
 }
+
+bool AP_Mission::start_command_fence(const AP_Mission::Mission_Command& cmd)
+{
+#if AP_FENCE_ENABLED
+    AC_Fence* fence = AP::fence();
+
+    if (fence == nullptr) {
+        return false;
+    }
+
+    if (cmd.p1 == uint8_t(AC_Fence::MavlinkFenceActions::DISABLE_FENCE)) {          // disable fence
+        uint8_t fences = fence->enable_configured(false);
+        fence->print_fence_message("disabled", fences);
+        return true;
+    } else if (cmd.p1 == uint8_t(AC_Fence::MavlinkFenceActions::ENABLE_FENCE)) {   // enable fence
+        uint8_t fences = fence->enable_configured(true);
+        fence->print_fence_message("enabled", fences);
+        return true;
+    } else if (cmd.p1 == uint8_t(AC_Fence::MavlinkFenceActions::DISABLE_ALT_MIN_FENCE)) {   // disable fence floor only
+        fence->disable_floor();
+        fence->print_fence_message("disabled", AC_FENCE_TYPE_ALT_MIN);
+        return true;
+    }
+#endif // AP_FENCE_ENABLED
+    return false;
+}
+
+#endif  // AP_MISSION_ENABLED
+
+#if AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED
+bool AP_Mission::start_command_do_set_roi_wpnext_offset(const AP_Mission::Mission_Command& cmd)
+{
+#if HAL_MOUNT_ENABLED
+    AP_Mount *mount = AP::mount();
+    if (mount == nullptr) {
+        return false;
+    }
+
+    // we do not use the gimbal ID here; we want to use the proper
+    // mavlink semantics and lack the infrastructure.
+    mount->set_roi_target_wpnext_offset(Vector3f{
+        cmd.content.wpnext_offset.roll_offset_cd * 0.01f,
+        cmd.content.wpnext_offset.pitch_offset_cd * 0.01f,
+        cmd.content.wpnext_offset.yaw_offset_cd * 0.01f
+    });
+
+    return true;
+#else
+    return false;
+#endif // HAL_MOUNT_ENABLED
+}
+#endif // AP_MISSION_MAV_CMD_DO_SET_ROI_WPNEXT_OFFSET_ENABLED

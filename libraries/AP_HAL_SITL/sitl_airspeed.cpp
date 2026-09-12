@@ -24,35 +24,14 @@ using namespace HALSITL;
 #define VOLTS_TO_PASCAL 819
 #define PASCAL_TO_VOLTS(_p) (_p/VOLTS_TO_PASCAL)
 
-// return current scale factor that converts from equivalent to true airspeed
-// valid for altitudes up to 10km AMSL
-// assumes standard atmosphere lapse rate
-static float get_EAS2TAS(float altitude)
-{
-    float pressure = AP::baro().get_pressure();
-    if (is_zero(pressure)) {
-        return 1.0f;
-    }
-
-    float sigma, delta, theta;
-    AP_Baro::SimpleAtmosphere(altitude * 0.001, sigma, delta, theta);
-
-    float tempK = C_TO_KELVIN(25) - ISA_LAPSE_RATE * altitude;
-    const float eas2tas_squared = SSL_AIR_DENSITY / (pressure / (ISA_GAS_CONSTANT * tempK));
-    if (!is_positive(eas2tas_squared)) {
-        return 1.0;
-    }
-    return sqrtf(eas2tas_squared);
-}
-
 /*
-  convert airspeed in m/s to an airspeed sensor value
+  convert equivalent airspeed (EAS) in m/s to an airspeed sensor value
  */
-void SITL_State::_update_airspeed(float true_airspeed)
+void SITL_State::_update_airspeed(float eas)
 {
     for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
         const auto &arspd = _sitl->airspeed[i];
-        float airspeed = true_airspeed / get_EAS2TAS(_sitl->state.altitude);
+        float airspeed = eas;
         const float diff_pressure = sq(airspeed) / arspd.ratio;
         float airspeed_raw;
     

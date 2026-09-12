@@ -29,7 +29,7 @@
 
 #define VTX_TRAMP_POWER_COUNT 5
 
-#define VTX_TRAMP_MIN_FREQUENCY_MHZ 5000             //min freq in MHz
+#define VTX_TRAMP_MIN_FREQUENCY_MHZ 1000             //min freq in MHz
 #define VTX_TRAMP_MAX_FREQUENCY_MHZ 5999             //max freq in MHz
 // Maximum number of requests sent to try a config change
 // Some VTX fail to respond to every request (like Matek FCHUB-VTX) so
@@ -37,6 +37,11 @@
 #define VTX_TRAMP_MAX_RETRIES (20)
 // Race lock - settings can't be changed
 #define TRAMP_CONTROL_RACE_LOCK (0x01)
+
+#define VTX_TRAMP_UART_BAUD            9600
+#define VTX_TRAMP_SMARTBAUD_MIN        9120     // -5%
+#define VTX_TRAMP_SMARTBAUD_MAX        10080    // +5%
+#define VTX_TRAMP_SMARTBAUD_STEP       120
 
 class AP_Tramp
 {
@@ -54,8 +59,9 @@ public:
     bool init(void);
     void update();
 
-    uint16_t get_current_actual_power();
-    uint16_t get_current_temp();
+    // actual transmitted power reported by the VTX in the 'v' response
+    uint16_t get_current_actual_power() const { return cur_act_power; }
+    int16_t get_current_temp() const { return cur_temp; }
 
 private:
     uint8_t checksum(uint8_t *buf);
@@ -73,6 +79,8 @@ private:
     void set_frequency(uint16_t freq);
     void set_power(uint16_t power);
     void set_pit_mode(uint8_t onoff);
+    // change baud automatically when request-response fails many times
+    void update_baud_rate();
 
     // serial interface
     AP_HAL::UARTDriver *port;                  // UART used to send data to Tramp VTX
@@ -114,9 +122,27 @@ private:
     uint16_t cur_act_power; // Actual power
     int16_t cur_temp;
     uint8_t cur_control_mode;
+    bool _act_power_warned;
+
+    // statistics
+    uint16_t _packets_sent;
+    uint16_t _packets_rcvd;
+
+    // value for current baud adjust
+    int32_t _smartbaud = VTX_TRAMP_UART_BAUD;
+    enum class AutobaudDirection {
+        UP = 1,
+        DOWN = -1
+    } _smartbaud_direction = AutobaudDirection::DOWN;
 
     // Retry count
     uint8_t retry_count = VTX_TRAMP_MAX_RETRIES;
+
+    // retry counter only re-arms when one of these changes
+    uint16_t _last_conf_freq;
+    uint16_t _last_conf_power;
+    uint16_t _last_conf_options;
+    bool _power_warn_pending;
 
     // Receive state machine
     enum class ReceiveState {

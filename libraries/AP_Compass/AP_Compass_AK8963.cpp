@@ -49,11 +49,6 @@
 
 #define AK8963_MILLIGAUSS_SCALE 10.0f
 
-struct PACKED sample_regs {
-    int16_t val[3];
-    uint8_t st2;
-};
-
 extern const AP_HAL::HAL &hal;
 
 AP_Compass_AK8963::AP_Compass_AK8963(AP_AK8963_BusDriver *bus,
@@ -68,18 +63,18 @@ AP_Compass_AK8963::~AP_Compass_AK8963()
     delete _bus;
 }
 
-AP_Compass_Backend *AP_Compass_AK8963::probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev,
+AP_Compass_Backend *AP_Compass_AK8963::probe(AP_HAL::OwnPtr<AP_HAL::Device> dev,
                                              enum Rotation rotation)
 {
     if (!dev) {
         return nullptr;
     }
-    AP_AK8963_BusDriver *bus = new AP_AK8963_BusDriver_HALDevice(std::move(dev));
+    AP_AK8963_BusDriver *bus = NEW_NOTHROW AP_AK8963_BusDriver_HALDevice(std::move(dev));
     if (!bus) {
         return nullptr;
     }
 
-    AP_Compass_AK8963 *sensor = new AP_Compass_AK8963(bus, rotation);
+    AP_Compass_AK8963 *sensor = NEW_NOTHROW AP_Compass_AK8963(bus, rotation);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -88,7 +83,7 @@ AP_Compass_Backend *AP_Compass_AK8963::probe(AP_HAL::OwnPtr<AP_HAL::I2CDevice> d
     return sensor;
 }
 
-AP_Compass_Backend *AP_Compass_AK8963::probe_mpu9250(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev,
+AP_Compass_Backend *AP_Compass_AK8963::probe_mpu9250(AP_HAL::OwnPtr<AP_HAL::Device> dev,
                                                      enum Rotation rotation)
 {
     if (!dev) {
@@ -111,12 +106,12 @@ AP_Compass_Backend *AP_Compass_AK8963::probe_mpu9250(uint8_t mpu9250_instance,
     AP_InertialSensor &ins = *AP_InertialSensor::get_singleton();
 
     AP_AK8963_BusDriver *bus =
-        new AP_AK8963_BusDriver_Auxiliary(ins, HAL_INS_MPU9250_SPI, mpu9250_instance, AK8963_I2C_ADDR);
+        NEW_NOTHROW AP_AK8963_BusDriver_Auxiliary(ins, HAL_INS_MPU9250_SPI, mpu9250_instance, AK8963_I2C_ADDR);
     if (!bus) {
         return nullptr;
     }
 
-    AP_Compass_AK8963 *sensor = new AP_Compass_AK8963(bus, rotation);
+    AP_Compass_AK8963 *sensor = NEW_NOTHROW AP_Compass_AK8963(bus, rotation);
     if (!sensor || !sensor->init()) {
         delete sensor;
         return nullptr;
@@ -167,12 +162,11 @@ bool AP_Compass_AK8963::init()
 
     /* register the compass instance in the frontend */
     _bus->set_device_type(DEVTYPE_AK8963);
-    if (!register_compass(_bus->get_bus_id(), _compass_instance)) {
+    if (!register_compass(_bus->get_bus_id())) {
         goto fail;
     }
-    set_dev_id(_compass_instance, _bus->get_bus_id());
 
-    set_rotation(_compass_instance, _rotation);
+    set_rotation(_rotation);
     bus_sem->give();
 
     _bus->register_periodic_callback(10000, FUNCTOR_BIND_MEMBER(&AP_Compass_AK8963::_update, void));
@@ -190,7 +184,7 @@ void AP_Compass_AK8963::read()
         return;
     }
 
-    drain_accumulated_samples(_compass_instance);
+    drain_accumulated_samples();
 }
 
 void AP_Compass_AK8963::_make_adc_sensitivity_adjustment(Vector3f& field) const
@@ -232,7 +226,7 @@ void AP_Compass_AK8963::_update()
     _make_adc_sensitivity_adjustment(raw_field);
     raw_field *= AK8963_MILLIGAUSS_SCALE;
 
-    accumulate_sample(raw_field, _compass_instance, 10);
+    accumulate_sample(raw_field, 10);
 }
 
 bool AP_Compass_AK8963::_check_id()
@@ -263,11 +257,19 @@ bool AP_Compass_AK8963::_reset()
 bool AP_Compass_AK8963::_calibrate()
 {
     /* Enable FUSE-mode in order to be able to read calibration data */
-    _bus->register_write(AK8963_CNTL1, AK8963_FUSE_MODE | AK8963_16BIT_ADC);
+    if (!_bus->register_write(AK8963_CNTL1, AK8963_FUSE_MODE | AK8963_16BIT_ADC)) {
+        // without fuse-ROM access mode the sensitivity adjustment
+        // registers do not hold the calibration data
+        return false;
+    }
 
     uint8_t response[3];
 
-    _bus->block_read(AK8963_ASAX, response, 3);
+    if (!_bus->block_read(AK8963_ASAX, response, 3)) {
+        // the sensitivity adjustment values were not read; response is
+        // undefined, so do not calibrate from it
+        return false;
+    }
 
     for (int i = 0; i < 3; i++) {
         float data = response[i];
@@ -277,8 +279,8 @@ bool AP_Compass_AK8963::_calibrate()
     return true;
 }
 
-/* AP_HAL::I2CDevice implementation of the AK8963 */
-AP_AK8963_BusDriver_HALDevice::AP_AK8963_BusDriver_HALDevice(AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev)
+/* AP_HAL::Device implementation of the AK8963 */
+AP_AK8963_BusDriver_HALDevice::AP_AK8963_BusDriver_HALDevice(AP_HAL::OwnPtr<AP_HAL::Device> dev)
     : _dev(std::move(dev))
 {
 }
@@ -379,7 +381,7 @@ bool AP_AK8963_BusDriver_Auxiliary::configure()
 
 bool AP_AK8963_BusDriver_Auxiliary::start_measurements()
 {
-    if (_bus->register_periodic_read(_slave, AK8963_HXL, sizeof(sample_regs)) < 0) {
+    if (_bus->register_periodic_read(_slave, AK8963_HXL, sizeof(AP_Compass_AK8963::sample_regs)) < 0) {
         return false;
     }
 

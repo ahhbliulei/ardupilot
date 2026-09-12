@@ -15,6 +15,8 @@
 # You should have received a copy of the GNU General Public License along
 # with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+# flake8: noqa
+
 """
 Waf tool for external builds with cmake. This tool defines the feature
 'cmake_build', for building through the cmake interface.
@@ -23,7 +25,7 @@ You can use CMAKE_MIN_VERSION environment variable before loading this tool in
 the configuration to set a minimum version required for cmake. Example::
 
     def configure(cfg):
-        cfg.CMAKE_MIN_VERSION = '3.5.2'
+        cfg.env.CMAKE_MIN_VERSION = '3.5.2'
         cfg.load('cmake')
 
 Usage example::

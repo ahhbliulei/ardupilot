@@ -16,9 +16,11 @@
   simulator connector for webots simulator
 */
 
-#include "SIM_Webots.h"
+#include "SIM_config.h"
 
-#if HAL_SIM_WEBOTS_ENABLED
+#if AP_SIM_WEBOTS_ENABLED
+
+#include "SIM_Webots.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -29,7 +31,6 @@
 #include <sys/types.h>
 
 #include <AP_HAL/AP_HAL.h>
-#include <AP_Logger/AP_Logger.h>
 #include "pthread.h"
 #include <AP_HAL/utility/replace.h>
 
@@ -181,7 +182,7 @@ bool Webots::parse_sensors(const char *json)
         p += strlen(key.key)+3;
         switch (key.type) {
         case DATA_FLOAT:
-            *((float *)key.ptr) = atof(p);
+            *((float *)key.ptr) = strtof(p, nullptr);
             //printf("GOT  %s/%s value: %f\n", key.section, key.key, *((float *)key.ptr));
             break;
 
@@ -266,7 +267,7 @@ bool Webots::parse_sensors(const char *json)
                     v->data = d;
                     v->length = n+1;
                 }
-                v->data[n] = atof(p);
+                v->data[n] = strtof(p, nullptr);
                 n++;
                 p = strchr(p,',');
                 if (!p) {
@@ -291,7 +292,7 @@ bool Webots::parse_sensors(const char *json)
 bool Webots::connect_sockets(void)
 {
     if (!sim_sock) {
-        sim_sock = new SocketAPM(false);
+        sim_sock = NEW_NOTHROW SocketAPM_native(false);
         if (!sim_sock) {
             AP_HAL::panic("Out of memory for sensors socket");
         }
@@ -439,8 +440,10 @@ void Webots::output (const struct sitl_input &input)
   update the Webots simulation by one time step
  */
 void Webots::update(const struct sitl_input &input)
-{   
+{
     static bool first = true;
+    update_battery();
+
     if (!connect_sockets()) {
         return;
     }
@@ -536,4 +539,4 @@ void Webots::report_FPS(void)
     // }
 }
 
-#endif // HAL_SIM_WEBOTS_ENABLED
+#endif  // AP_SIM_WEBOTS_ENABLED

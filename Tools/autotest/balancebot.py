@@ -5,14 +5,12 @@ AP_FLAKE8_CLEAN
 
 '''
 
-from __future__ import print_function
-
 import os
 
-from rover import AutoTestRover
-from common import AutoTest
+import vehicle_test_suite
 
-from common import NotAchievedException
+from rover import AutoTestRover
+from vehicle_test_suite import NotAchievedException
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
@@ -87,7 +85,7 @@ class AutoTestBalanceBot(AutoTestRover):
                 if delta > 5:
                     raise NotAchievedException("wheel distance incorrect")
             self.disarm_vehicle()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.progress("Caught exception: %s" %
                           self.get_exception_stacktrace(e))
             self.disarm_vehicle()
@@ -105,13 +103,13 @@ class AutoTestBalanceBot(AutoTestRover):
 
         '''note that while AutoTestBalanceBot inherits from Rover we don't
 inherit Rover's tests!'''
-        ret = AutoTest.tests(self)
+        ret = vehicle_test_suite.TestSuite.tests(self)
 
         ret.extend([
             self.DriveRTL,
             self.DriveMission,
             self.TestWheelEncoder,
-            self.GetBanner,
+            self.MAV_CMD_DO_SEND_BANNER,
             self.DO_SET_MODE,
             self.ServoRelayEvents,
         ])

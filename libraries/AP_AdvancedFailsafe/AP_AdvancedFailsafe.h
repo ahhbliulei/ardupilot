@@ -58,7 +58,7 @@ public:
         {
             AP_Param::setup_object_defaults(this, var_info);
             if (_singleton != nullptr) {
-                AP_HAL::panic("AP_Logger must be singleton");
+                AP_HAL::panic("AP_AdvancedFailsafe must be singleton");
             }
 
             _singleton = this;
@@ -81,6 +81,9 @@ public:
     // generate heartbeat msgs, so external failsafe boards are happy
     // during sensor calibration
     void heartbeat(void);
+
+    //return true if we should jump to _wp_comms_hold
+    bool should_use_comms_hold(void);
 
     // return true if we are terminating (deliberately crashing the vehicle)
     bool should_crash_vehicle(void);
@@ -105,6 +108,9 @@ protected:
     // return the AFS mapped control mode
     virtual enum control_mode afs_mode(void) = 0;
 
+    //to force entering auto mode when datalink loss 
+    virtual void set_mode_auto(void) = 0;
+
     enum state _state;
 
     AP_Int8 _enable;
@@ -123,6 +129,7 @@ protected:
     AP_Int32 _amsl_limit;
     AP_Int32 _amsl_margin_gps;
     AP_Float _rc_fail_time_seconds;
+    AP_Float _gcs_fail_time_seconds;
     AP_Int8  _max_gps_loss;
     AP_Int8  _max_comms_loss;
     AP_Int8  _enable_geofence_fs;
@@ -134,7 +141,7 @@ protected:
     bool _heartbeat_pin_value;
 
     // saved waypoint for resuming mission
-    uint8_t _saved_wp;
+    uint16_t _saved_wp;
     
     // number of times we've lost GPS
     uint8_t _gps_loss_count;
@@ -149,7 +156,7 @@ protected:
     uint32_t _last_gps_loss_ms;
 
     // have the failsafe values been setup?
-    bool _failsafe_setup:1;
+    bool _failsafe_setup;
 
     Location _first_location;
     bool _have_first_location;
@@ -162,6 +169,18 @@ private:
 
     // update maximum range check
     void max_range_update();
+
+    AP_Int16 options;
+    enum class Option {
+        CONTINUE_AFTER_RECOVERED = (1U<<0),
+        GCS_FS_ALL_AUTONOMOUS_MODES = (1U<<1),
+        CONTINUE_IF_ALREADY_IN_RETURN_PATH = (1U<<2),
+    };
+    bool option_is_set(Option option) const {
+        return (options.get() & int16_t(option)) != 0;
+    }
+
+    bool gps_altitude_ok() const;
 };
 
 namespace AP {

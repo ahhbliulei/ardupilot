@@ -99,6 +99,14 @@ const AP_Param::GroupInfo AP_MotorsHeli_Dual::var_info[] = {
     // @Values: 0:Disabled,1:Enabled
     // @User: Standard
 
+    // @Param: SW_PHANG
+    // @DisplayName: Swash 1 Phase Angle Compensation
+    // @Description: Phase angle compensation can be used to correct control coupling issues.  If pitching the swash forward induces a roll, this can be correct the problem.
+    // @Range: -30 30
+    // @Units: deg
+    // @User: Advanced
+    // @Increment: 1
+
     // @Param: SW_H3_ENABLE
     // @DisplayName: Swash 1 H3 Generic Enable
     // @Description: Automatically set when H3 generic swash type is selected for swashplate 1. Do not set manually.
@@ -125,14 +133,6 @@ const AP_Param::GroupInfo AP_MotorsHeli_Dual::var_info[] = {
     // @Range: -180 180
     // @Units: deg
     // @User: Advanced
-
-    // @Param: SW_H3_PHANG
-    // @DisplayName: Swash 1 H3 Generic Phase Angle Comp
-    // @Description: Only for H3 swashplate.  If pitching the swash forward induces a roll, this can be correct the problem
-    // @Range: -30 30
-    // @Units: deg
-    // @User: Advanced
-    // @Increment: 1
     AP_SUBGROUPINFO(_swashplate1, "SW_", 20, AP_MotorsHeli_Dual, AP_MotorsHeli_Swash),
 
     // @Param: SW2_TYPE
@@ -152,6 +152,14 @@ const AP_Param::GroupInfo AP_MotorsHeli_Dual::var_info[] = {
     // @Description: This linearizes the swashplate 2 servo's mechanical output to account for nonlinear output due to arm rotation.  This requires a specific setup procedure to work properly.  The servo arm must be centered on the mechanical throw at the servo trim position and the servo trim position kept as close to 1500 as possible. Leveling the swashplate can only be done through the pitch links.  See the ardupilot wiki for more details on setup.
     // @Values: 0:Disabled,1:Enabled
     // @User: Standard
+
+    // @Param: SW2_PHANG
+    // @DisplayName: Swash 2 Phase Angle Compensation
+    // @Description: Phase angle compensation can be used to correct control coupling issues.  If pitching the swash forward induces a roll, this can be correct the problem.
+    // @Range: -30 30
+    // @Units: deg
+    // @User: Advanced
+    // @Increment: 1
 
     // @Param: SW2_H3_ENABLE
     // @DisplayName: Swash 2 H3 Generic Enable
@@ -179,14 +187,6 @@ const AP_Param::GroupInfo AP_MotorsHeli_Dual::var_info[] = {
     // @Range: -180 180
     // @Units: deg
     // @User: Advanced
-
-    // @Param: SW2_H3_PHANG
-    // @DisplayName: Swash 2 H3 Generic Phase Angle Comp
-    // @Description: Only for H3 swashplate.  If pitching the swash forward induces a roll, this can be correct the problem
-    // @Range: -30 30
-    // @Units: deg
-    // @User: Advanced
-    // @Increment: 1
     AP_SUBGROUPINFO(_swashplate2, "SW2_", 21, AP_MotorsHeli_Dual, AP_MotorsHeli_Swash),
 
     // @Param: DCP_TRIM
@@ -225,38 +225,10 @@ void AP_MotorsHeli_Dual::init_outputs()
 {
     if (!initialised_ok()) {
         // set rotor servo range
-        _main_rotor.init_servo();
+        _main_rotor.initialize();
     }
 
     set_initialised_ok(_frame_class == MOTOR_FRAME_HELI_DUAL);
-}
-
-// calculate_armed_scalars
-void AP_MotorsHeli_Dual::calculate_armed_scalars()
-{
-    // Set rsc mode specific parameters
-    if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_THROTTLECURVE || _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_AUTOTHROTTLE) {
-        _main_rotor.set_throttle_curve();
-    }
-    // keeps user from changing RSC mode while armed
-    if (_main_rotor._rsc_mode.get() != _main_rotor.get_control_mode()) {
-        _main_rotor.reset_rsc_mode_param();
-        _heliflags.save_rsc_mode = true;
-        gcs().send_text(MAV_SEVERITY_CRITICAL, "RSC control mode change failed");
-    }
-    // saves rsc mode parameter when disarmed if it had been reset while armed
-    if (_heliflags.save_rsc_mode && !armed()) {
-        _main_rotor._rsc_mode.save();
-        _heliflags.save_rsc_mode = false;
-    }
-
-    if (_heliflags.in_autorotation) {
-        _main_rotor.set_autorotation_flag(_heliflags.in_autorotation);
-        // set bailout ramp time
-        _main_rotor.use_bailout_ramp_time(_heliflags.enable_bailout);
-    }else { 
-        _main_rotor.set_autorotation_flag(false);
-    }
 }
 
 // calculate_scalars
@@ -298,106 +270,99 @@ void AP_MotorsHeli_Dual::calculate_scalars()
     // configure swashplate 2 and update scalars
     _swashplate2.configure();
 
-    // set mode of main rotor controller and trigger recalculation of scalars
-    _main_rotor.set_control_mode(static_cast<RotorControlMode>(_main_rotor._rsc_mode.get()));
+    // configure main rotor and update scalars
+    _main_rotor.configure();
+
+    // calculate armed scalars for both main rotors
     calculate_armed_scalars();
+
 }
 
-// get_swashplate - calculate movement of each swashplate based on configuration
-float AP_MotorsHeli_Dual::get_swashplate (int8_t swash_num, int8_t swash_axis, float pitch_input, float roll_input, float yaw_input, float coll_input)
+// Mix and output swashplates for tandem
+void AP_MotorsHeli_Dual::mix_tandem(float pitch_input, float roll_input, float yaw_input, float collective1_input, float collective2_input)
 {
-    float swash_tilt = 0.0f;
-    if (_dual_mode == AP_MOTORS_HELI_DUAL_MODE_TRANSVERSE) {
-        // roll tilt
-        if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_ROLL) {
-            if (swash_num == 1) {
-                swash_tilt = 0.0f;
-            } else if (swash_num == 2) {
-                swash_tilt = 0.0f;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_PITCH) {
-        // pitch tilt
-            if (swash_num == 1) {
-                swash_tilt = pitch_input - _yaw_scaler * yaw_input;
-            } else if (swash_num == 2) {
-                swash_tilt = pitch_input + _yaw_scaler * yaw_input;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_COLL) {
-        // collective
-            if (swash_num == 1) {
-                swash_tilt = 0.45f * _dcp_scaler * (roll_input + constrain_float(_dcp_trim, -0.2f, 0.2f)) + coll_input;
-            } else if (swash_num == 2) {
-                swash_tilt = -0.45f * _dcp_scaler * (roll_input + constrain_float(_dcp_trim, -0.2f, 0.2f)) + coll_input;
-            }
-        }
-    } else if (_dual_mode == AP_MOTORS_HELI_DUAL_MODE_INTERMESHING) {
-        // roll tilt
-        if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_ROLL) {
-            if (swash_num == 1) {
-                swash_tilt = roll_input;
-            } else if (swash_num == 2) {
-                swash_tilt = roll_input;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_PITCH) {
-        // pitch tilt
-            if (swash_num == 1) {
-                swash_tilt = pitch_input - _yaw_scaler * yaw_input;
-            } else if (swash_num == 2) {
-                swash_tilt = pitch_input + _yaw_scaler * yaw_input;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_COLL) {
-        // collective
-            if (swash_num == 1) {
-                swash_tilt = 0.45f * _dcp_scaler * yaw_input + coll_input;
-            } else if (swash_num == 2) {
-                swash_tilt = -0.45f * _dcp_scaler * yaw_input + coll_input;
-            }
-        }
-    } else { // AP_MOTORS_HELI_DUAL_MODE_TANDEM
-        // roll tilt
-        if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_ROLL) {
-            if (swash_num == 1) {
-                swash_tilt = roll_input + _yaw_scaler * yaw_input;
-            } else if (swash_num == 2) {
-                swash_tilt = roll_input - _yaw_scaler * yaw_input;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_PITCH) {
-        // pitch tilt
-            if (swash_num == 1) {
-                swash_tilt = 0.0f;
-            } else if (swash_num == 2) {
-                swash_tilt = 0.0f;
-            }
-        } else if (swash_axis == AP_MOTORS_HELI_DUAL_SWASH_AXIS_COLL) {
-        // collective
-            if (swash_num == 1) {
-                swash_tilt = 0.45f * _dcp_scaler * (pitch_input + constrain_float(_dcp_trim, -0.2f, 0.2f)) + coll_input;
-            } else if (swash_num == 2) {
-                swash_tilt = -0.45f * _dcp_scaler * (pitch_input + constrain_float(_dcp_trim, -0.2f, 0.2f)) + coll_input;
-            }
-        }
-    }
-    return swash_tilt;
+    // Differential cyclic roll is used for yaw and combined for roll
+    const float swash1_roll = roll_input + _yaw_scaler * yaw_input;
+    const float swash2_roll = roll_input - _yaw_scaler * yaw_input;
+
+    // cyclic is not used for pitch control
+    const float swash_pitch = 0.0;
+
+    // Differential collective for pitch and combined for thrust
+    const float swash1_coll =  0.45 * _dcp_scaler * (pitch_input + constrain_float(_dcp_trim, -0.2, 0.2)) + collective1_input;
+    const float swash2_coll = -0.45 * _dcp_scaler * (pitch_input + constrain_float(_dcp_trim, -0.2, 0.2)) + collective2_input;
+
+    // Calculate servo positions in swashplate library
+    _swashplate1.calculate(swash1_roll, swash_pitch, swash1_coll);
+    _swashplate2.calculate(swash2_roll, swash_pitch, swash2_coll);
+}
+
+// Mix and output swashplates for transverse
+void AP_MotorsHeli_Dual::mix_transverse(float pitch_input, float roll_input, float yaw_input, float collective1_input, float collective2_input)
+{
+    // cyclic is not used for roll control
+    const float swash_roll = 0.0;
+
+    // Differential cyclic pitch is used for yaw
+    const float swash1_pitch = pitch_input - _yaw_scaler * yaw_input;
+    const float swash2_pitch = pitch_input + _yaw_scaler * yaw_input;
+
+    // Differential collective for roll and combined for thrust
+    const float swash1_coll =  0.45 * _dcp_scaler * (roll_input + constrain_float(_dcp_trim, -0.2, 0.2)) + collective1_input;
+    const float swash2_coll = -0.45 * _dcp_scaler * (roll_input + constrain_float(_dcp_trim, -0.2, 0.2)) + collective2_input;
+
+    // Calculate servo positions in swashplate library
+    _swashplate1.calculate(swash_roll, swash1_pitch, swash1_coll);
+    _swashplate2.calculate(swash_roll, swash2_pitch, swash2_coll);
+}
+
+// Mix and output swashplates for intermeshing
+void AP_MotorsHeli_Dual::mix_intermeshing(float pitch_input, float roll_input, float yaw_input, float collective1_input, float collective2_input)
+{
+    // Direct roll control on both swash plates
+    const float swash_roll = roll_input;
+
+    // Differential cyclic pitch is used for yaw and combined for pitch
+    const float swash1_pitch = pitch_input - _yaw_scaler * yaw_input;
+    const float swash2_pitch = pitch_input + _yaw_scaler * yaw_input;
+
+    // Differential collective for yaw and combined for thrust
+    const float swash1_coll =   0.45 * _dcp_scaler * yaw_input + collective1_input;
+    const float swash2_coll =  -0.45 * _dcp_scaler * yaw_input + collective2_input;
+
+    // Calculate servo positions in swashplate library
+    _swashplate1.calculate(swash_roll, swash1_pitch, swash1_coll);
+    _swashplate2.calculate(swash_roll, swash2_pitch, swash2_coll);
 }
 
 // update_motor_controls - sends commands to motor controllers
-void AP_MotorsHeli_Dual::update_motor_control(RotorControlState state)
+void AP_MotorsHeli_Dual::update_motor_control(AP_MotorsHeli_RSC::DesiredRSCSpoolState state)
 {
     // Send state update to motors
-    _main_rotor.output(state);
+    _main_rotor.update(_dt_s);
 
-    if (state == ROTOR_CONTROL_STOP) {
+    if (state == AP_MotorsHeli_RSC::DesiredRSCSpoolState::SHUT_DOWN) {
         // set engine run enable aux output to not run position to kill engine when disarmed
         SRV_Channels::set_output_limit(SRV_Channel::k_engine_run_enable, SRV_Channel::Limit::MIN);
     } else {
         // else if armed, set engine run enable output to run position
         SRV_Channels::set_output_limit(SRV_Channel::k_engine_run_enable, SRV_Channel::Limit::MAX);
     }
+}
 
-    // Check if rotors are run-up
-    _heliflags.rotor_runup_complete = _main_rotor.is_runup_complete();
-    // Check if rotors are spooled down
-    _heliflags.rotor_spooldown_complete = _main_rotor.is_spooldown_complete();
+// update_spool_state - updates the spool state based on the desired state
+AP_Motors::SpoolState AP_MotorsHeli_Dual::update_spool_state(AP_MotorsHeli_RSC::DesiredRSCSpoolState state)
+{
+
+    SpoolState main_rotor_state = _main_rotor.update_spool_state(state, _dt_s);
+
+    // Check if main rotor is run-up complete.  Tail rotor run-up is not included in check because currently
+    // the tail rotor in DDVP uses the same ramp and runup time as the main rotor.  This may need changed if 
+    // the RSC is used for DDFP tail rotors.
+    set_rotor_runup_complete(main_rotor_state == AP_MotorsHeli_RSC::RSCSpoolState::THROTTLE_UNLIMITED);
+
+    return main_rotor_state;
+
 }
 
 //
@@ -410,10 +375,6 @@ void AP_MotorsHeli_Dual::update_motor_control(RotorControlState state)
 //
 void AP_MotorsHeli_Dual::move_actuators(float roll_out, float pitch_out, float collective_in, float yaw_out)
 {
-    // initialize limits flag
-    limit.throttle_lower = false;
-    limit.throttle_upper = false;
-
     if (_dual_mode == AP_MOTORS_HELI_DUAL_MODE_TRANSVERSE || _dual_mode == AP_MOTORS_HELI_DUAL_MODE_INTERMESHING) {
         if (pitch_out < -_cyclic_max/4500.0f) {
             pitch_out = -_cyclic_max/4500.0f;
@@ -424,7 +385,8 @@ void AP_MotorsHeli_Dual::move_actuators(float roll_out, float pitch_out, float c
             pitch_out = _cyclic_max/4500.0f;
             limit.pitch = true;
         }
-    } else {
+    }
+    if (_dual_mode != AP_MOTORS_HELI_DUAL_MODE_TRANSVERSE) {
         if (roll_out < -_cyclic_max/4500.0f) {
             roll_out = -_cyclic_max/4500.0f;
             limit.roll = true;
@@ -434,10 +396,6 @@ void AP_MotorsHeli_Dual::move_actuators(float roll_out, float pitch_out, float c
             roll_out = _cyclic_max/4500.0f;
             limit.roll = true;
         }
-    }
-
-    if (_heliflags.inverted_flight) {
-        collective_in = 1 - collective_in;
     }
 
     // constrain collective input
@@ -458,11 +416,7 @@ void AP_MotorsHeli_Dual::move_actuators(float roll_out, float pitch_out, float c
     }
 
     // updates below land min collective flag
-    if (collective_out <= _collective_land_min_pct) {
-        _heliflags.below_land_min_coll = true;
-    } else {
-        _heliflags.below_land_min_coll = false;
-    }
+    _heliflags.below_land_min_coll = !is_positive(collective_out - _collective_land_min_pct);
 
     // updates takeoff collective flag based on 50% hover collective
     update_takeoff_collective_flag(collective_out);
@@ -517,17 +471,22 @@ void AP_MotorsHeli_Dual::move_actuators(float roll_out, float pitch_out, float c
     // ToDo: add main rotor cyclic power?
     _main_rotor.set_collective(fabsf(collective_out));
 
-    // compute swashplate tilt
-    float swash1_pitch = get_swashplate(1, AP_MOTORS_HELI_DUAL_SWASH_AXIS_PITCH, pitch_out, roll_out, yaw_out, collective_out_scaled);
-    float swash1_roll = get_swashplate(1, AP_MOTORS_HELI_DUAL_SWASH_AXIS_ROLL, pitch_out, roll_out, yaw_out, collective_out_scaled);
-    float swash1_coll = get_swashplate(1, AP_MOTORS_HELI_DUAL_SWASH_AXIS_COLL, pitch_out, roll_out, yaw_out, collective_out_scaled);
-    float swash2_pitch = get_swashplate(2, AP_MOTORS_HELI_DUAL_SWASH_AXIS_PITCH, pitch_out, roll_out, yaw_out, collective2_out_scaled);
-    float swash2_roll = get_swashplate(2, AP_MOTORS_HELI_DUAL_SWASH_AXIS_ROLL, pitch_out, roll_out, yaw_out, collective2_out_scaled);
-    float swash2_coll = get_swashplate(2, AP_MOTORS_HELI_DUAL_SWASH_AXIS_COLL, pitch_out, roll_out, yaw_out, collective2_out_scaled);
- 
-    // Calculate servo positions in swashplate library
-    _swashplate1.calculate(swash1_roll, swash1_pitch, swash1_coll);
-    _swashplate2.calculate(swash2_roll, swash2_pitch, swash2_coll);
+    // Mix swash plate
+    switch (_dual_mode) {
+        case AP_MOTORS_HELI_DUAL_MODE_TANDEM:
+        default:
+            mix_tandem(pitch_out, roll_out, yaw_out, collective_out_scaled, collective2_out_scaled);
+            break;
+
+        case AP_MOTORS_HELI_DUAL_MODE_TRANSVERSE:
+            mix_transverse(pitch_out, roll_out, yaw_out, collective_out_scaled, collective2_out_scaled);
+            break;
+
+        case AP_MOTORS_HELI_DUAL_MODE_INTERMESHING:
+            mix_intermeshing(pitch_out, roll_out, yaw_out, collective_out_scaled, collective2_out_scaled);
+            break;
+
+    }
 
 }
 
@@ -541,25 +500,8 @@ void AP_MotorsHeli_Dual::output_to_motors()
     _swashplate1.output();
     _swashplate2.output();
 
-    switch (_spool_state) {
-        case SpoolState::SHUT_DOWN:
-            // sends minimum values out to the motors
-            update_motor_control(ROTOR_CONTROL_STOP);
-            break;
-        case SpoolState::GROUND_IDLE:
-            // sends idle output to motors when armed. rotor could be static or turning (autorotation)
-            update_motor_control(ROTOR_CONTROL_IDLE);
-            break;
-        case SpoolState::SPOOLING_UP:
-        case SpoolState::THROTTLE_UNLIMITED:
-            // set motor output based on thrust requests
-            update_motor_control(ROTOR_CONTROL_ACTIVE);
-            break;
-        case SpoolState::SPOOLING_DOWN:
-            // sends idle output to motors and wait for rotor to stop
-            update_motor_control(ROTOR_CONTROL_IDLE);
-            break;
-    }
+    _main_rotor.output_to_servo();
+
 }
 
 // servo_test - move servos through full range of movement
@@ -568,27 +510,27 @@ void AP_MotorsHeli_Dual::servo_test()
     // this test cycle is equivalent to that of AP_MotorsHeli_Single, but excluding
     // mixing of yaw, as that physical movement is represented by pitch and roll
 
-    _servo_test_cycle_time += _dt;
+    _servo_test_cycle_time += _dt_s;
 
     if ((_servo_test_cycle_time >= 0.0f && _servo_test_cycle_time < 0.5f)||                                   // Tilt swash back
         (_servo_test_cycle_time >= 6.0f && _servo_test_cycle_time < 6.5f)){
-        _pitch_test += 2.0 * _dt;
-        _oscillate_angle += 8 * M_PI * _dt;
+        _pitch_test += 2.0 * _dt_s;
+        _oscillate_angle += 8 * M_PI * _dt_s;
     } else if ((_servo_test_cycle_time >= 0.5f && _servo_test_cycle_time < 4.5f)||                            // Roll swash around
                (_servo_test_cycle_time >= 6.5f && _servo_test_cycle_time < 10.5f)){
-        _oscillate_angle += 0.5 * M_PI * _dt;
+        _oscillate_angle += 0.5 * M_PI * _dt_s;
         _roll_test = sinf(_oscillate_angle);
         _pitch_test = cosf(_oscillate_angle);
     } else if ((_servo_test_cycle_time >= 4.5f && _servo_test_cycle_time < 5.0f)||                            // Return swash to level
                (_servo_test_cycle_time >= 10.5f && _servo_test_cycle_time < 11.0f)){
-        _pitch_test -= 2.0 * _dt;
-        _oscillate_angle += 8 * M_PI * _dt;
+        _pitch_test -= 2.0 * _dt_s;
+        _oscillate_angle += 8 * M_PI * _dt_s;
     } else if (_servo_test_cycle_time >= 5.0f && _servo_test_cycle_time < 6.0f){                              // Raise swash to top
-        _collective_test +=  _dt;
-        _oscillate_angle += 2 * M_PI * _dt;
+        _collective_test +=  _dt_s;
+        _oscillate_angle += 2 * M_PI * _dt_s;
     } else if (_servo_test_cycle_time >= 11.0f && _servo_test_cycle_time < 12.0f){                            // Lower swash to bottom
-        _collective_test -=  _dt;
-        _oscillate_angle += 2 * M_PI * _dt;
+        _collective_test -=  _dt_s;
+        _oscillate_angle += 2 * M_PI * _dt_s;
     } else {                                                                                                  // reset cycle
         _servo_test_cycle_time = 0.0f;
         _oscillate_angle = 0.0f;
@@ -608,25 +550,74 @@ void AP_MotorsHeli_Dual::servo_test()
     _pitch_in = constrain_float(_pitch_test, -1.0f, 1.0f);
 }
 
-// parameter_check - check if helicopter specific parameters are sensible
-bool AP_MotorsHeli_Dual::parameter_check(bool display_msg) const
+// Run arming checks
+bool AP_MotorsHeli_Dual::arming_checks(size_t buflen, char *buffer) const
 {
+    // run base class checks
+    if (!AP_MotorsHeli::arming_checks(buflen, buffer)) {
+        return false;
+    }
+
     // returns false if Phase Angle is outside of range for H3 swashplate 1
-    if (_swashplate1.get_swash_type() == SWASHPLATE_TYPE_H3 && (_swashplate1.get_phase_angle() > 30 || _swashplate1.get_phase_angle() < -30)){
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_SW1_H3_PHANG out of range");
-        }
+    if (_swashplate1.get_phase_angle() > 30 || _swashplate1.get_phase_angle() < -30){
+        hal.util->snprintf(buffer, buflen, "H_SW_PHANG out of range");
         return false;
     }
 
     // returns false if Phase Angle is outside of range for H3 swashplate 2
-    if (_swashplate2.get_swash_type() == SWASHPLATE_TYPE_H3 && (_swashplate2.get_phase_angle() > 30 || _swashplate2.get_phase_angle() < -30)){
-        if (display_msg) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "PreArm: H_SW2_H3_PHANG out of range");
-        }
+    if (_swashplate2.get_phase_angle() > 30 || _swashplate2.get_phase_angle() < -30){
+        hal.util->snprintf(buffer, buflen, "H_SW2_PHANG out of range");
         return false;
     }
 
-    // check parent class parameters
-    return AP_MotorsHeli::parameter_check(display_msg);
+    return true;
 }
+
+// Helper function for param conversions which are easier to be done in the motors class
+// Called from system.cpp
+void AP_MotorsHeli_Dual::heli_motors_param_conversions(void)
+{
+    // Run common conversions from base class
+    AP_MotorsHeli::heli_motors_param_conversions();
+
+    if (_swashplate1.get_swash_type() == SWASHPLATE_TYPE_H3) {
+        // PARAMETER_CONVERSION - Added: Mar-2026
+        // Previous versions had phase angle for only the generic H3 swashplate.  Phase angle is now available for all swashplate 
+        // types but needs to be converted for users of the generic H3 type.  Convert old H3 phase angle parameter to new parameter
+        // applicable to all swashplate types.
+        const AP_Param::ConversionInfo sw1_phase_conversion_info[] = {
+            { 90, 532, AP_PARAM_INT16,  "H_SW_PHANG" },
+        };
+        uint8_t table_size = ARRAY_SIZE(sw1_phase_conversion_info);
+        for (uint8_t i=0; i<table_size; i++) {
+            AP_Param::convert_old_parameter(&sw1_phase_conversion_info[i], 1.0);
+        }
+    }
+    if (_swashplate2.get_swash_type() == SWASHPLATE_TYPE_H3) {
+        // PARAMETER_CONVERSION - Added: Mar-2026
+        // Previous versions had phase angle for only the generic H3 swashplate.  Phase angle is now available for all swashplate 
+        // types but needs to be converted for users of the generic H3 type.  Convert old H3 phase angle parameter to new parameter
+        // applicable to all swashplate types.
+        const AP_Param::ConversionInfo sw2_phase_conversion_info[] = {
+            { 90, 533, AP_PARAM_INT16,  "H_SW2_PHANG" },
+        };
+        uint8_t table_size = ARRAY_SIZE(sw2_phase_conversion_info);
+        for (uint8_t i=0; i<table_size; i++) {
+            AP_Param::convert_old_parameter(&sw2_phase_conversion_info[i], 1.0);
+        }
+    }
+
+}
+
+#if HAL_LOGGING_ENABLED
+// heli motors logging - called at 10 Hz
+void AP_MotorsHeli_Dual::Log_Write(void)
+{
+    // write swashplate log
+    _swashplate1.write_log(get_cyclic_angle_scaler(), _collective_min_deg.get(), _collective_max_deg.get(), _collective_min.get(), _collective_max.get());
+    _swashplate2.write_log(get_cyclic_angle_scaler(), _collective_min_deg.get(), _collective_max_deg.get(), _collective2_min.get(), _collective2_max.get());
+
+    // write RSC log
+    _main_rotor.write_log();
+}
+#endif

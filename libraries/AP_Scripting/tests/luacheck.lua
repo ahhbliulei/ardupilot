@@ -2,20 +2,28 @@
 -- https://luacheck.readthedocs.io/en/stable/warnings.html
 ignore = {"111", -- Setting an undefined global variable.
           "113", -- Accessing an undefined global variable.
+          "212/_.*", -- Unused argument. Ignore only when argument starts with a underscore
           "631", -- Line is too long.
           "611", -- A line consists of nothing but whitespace.
           "612", -- A line contains trailing whitespace.
           "614"} -- Trailing whitespace in a comment.
 
 -- These lua scripts are not for running on AP
-exclude_files = {"Tools/CHDK-Scripts/*", "modules/*", "libraries/AP_Scripting/tests/luacheck.lua"}
+exclude_files = {"Tools/CHDK-Scripts/*", "modules/*", "libraries/AP_Scripting/tests/luacheck.lua", "lua-language-server/*"}
 
 -- Grab AP globals from docs file
 stds.ArduPilot = {}
 stds.ArduPilot.read_globals = {}
 
 local env = setmetatable({}, {__index = _G})
-assert(pcall(setfenv(assert(loadfile("libraries/AP_Scripting/docs/docs.lua")), env)))
+local docs_loader
+if _VERSION == "Lua 5.1" then
+    docs_loader = assert(loadfile("libraries/AP_Scripting/docs/docs.lua"))
+    setfenv(docs_loader, env)
+else
+    docs_loader = assert(loadfile("libraries/AP_Scripting/docs/docs.lua", "t", env))
+end
+assert(pcall(docs_loader))
 
 for key, value in pairs(env) do
     local singleton = { other_fields = false }

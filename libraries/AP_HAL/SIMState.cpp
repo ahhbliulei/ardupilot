@@ -1,6 +1,6 @@
 #include "SIMState.h"
 
-#if AP_SIM_ENABLED && CONFIG_HAL_BOARD != HAL_BOARD_SITL
+#if AP_SIM_ENABLED
 
 /*
  *  This is a very-much-cut-down AP_HAL_SITL object.  We should make
@@ -12,6 +12,7 @@
 #include <SITL/SIM_Helicopter.h>
 #include <SITL/SIM_SingleCopter.h>
 #include <SITL/SIM_Plane.h>
+#include <SITL/SIM_Glider.h>
 #include <SITL/SIM_QuadPlane.h>
 #include <SITL/SIM_Rover.h>
 #include <SITL/SIM_BalanceBot.h>
@@ -20,9 +21,13 @@
 #include <SITL/SIM_Tracker.h>
 #include <SITL/SIM_Submarine.h>
 #include <SITL/SIM_Blimp.h>
+#include <SITL/SIM_NoVehicle.h>
+#include <SITL/SIM_JSON.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 #include <AP_Baro/AP_Baro.h>
+
+#include <AP_BoardConfig/AP_BoardConfig.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -35,10 +40,18 @@ using namespace AP_HAL;
 #define AP_SIM_FRAME_CLASS MultiCopter
 #elif APM_BUILD_TYPE(APM_BUILD_Heli)
 #define AP_SIM_FRAME_CLASS Helicopter
+#elif APM_BUILD_TYPE(APM_BUILD_AntennaTracker)
+#define AP_SIM_FRAME_CLASS Tracker
 #elif APM_BUILD_TYPE(APM_BUILD_ArduPlane)
 #define AP_SIM_FRAME_CLASS Plane
 #elif APM_BUILD_TYPE(APM_BUILD_Rover)
 #define AP_SIM_FRAME_CLASS SimRover
+#elif APM_BUILD_TYPE(APM_BUILD_Blimp)
+#define AP_SIM_FRAME_CLASS Blimp
+#elif APM_BUILD_TYPE(APM_BUILD_ArduSub)
+#define AP_SIM_FRAME_CLASS Submarine
+#else
+#define AP_SIM_FRAME_CLASS NoVehicle
 #endif
 #endif
 
@@ -47,18 +60,28 @@ using namespace AP_HAL;
 #define AP_SIM_FRAME_STRING "+"
 #elif APM_BUILD_TYPE(APM_BUILD_Heli)
 #define AP_SIM_FRAME_STRING "heli"
+#elif APM_BUILD_TYPE(APM_BUILD_AntennaTracker)
+#define AP_SIM_FRAME_STRING "tracker"
 #elif APM_BUILD_TYPE(APM_BUILD_ArduPlane)
 #define AP_SIM_FRAME_STRING "plane"
 #elif APM_BUILD_TYPE(APM_BUILD_Rover)
 #define AP_SIM_FRAME_STRING "rover"
+#elif APM_BUILD_TYPE(APM_BUILD_Blimp)
+#define AP_SIM_FRAME_STRING "blimp"
+#elif APM_BUILD_TYPE(APM_BUILD_ArduSub)
+#define AP_SIM_FRAME_STRING "sub"
+#else
+#define AP_SIM_FRAME_STRING ""
 #endif
 #endif
 
 
+#if CONFIG_HAL_BOARD != HAL_BOARD_SITL
 void SIMState::update()
 {
     static bool init_done;
     if (!init_done) {
+        AP::sitl()->init();
         init_done = true;
         sitl_model = SITL::AP_SIM_FRAME_CLASS::create(AP_SIM_FRAME_STRING);
     }
@@ -99,6 +122,7 @@ void SIMState::fdm_input_local(void)
     // ride_along.receive(input);
 
     // update the model
+    sitl_model->update_home();
     sitl_model->update_model(input);
 
     // get FDM output from the model
@@ -107,27 +131,22 @@ void SIMState::fdm_input_local(void)
     }
     if (_sitl) {
         sitl_model->fill_fdm(_sitl->state);
-
-        if (_sitl->rc_fail == SITL::SIM::SITL_RCFail_None) {
-            for (uint8_t i=0; i< _sitl->state.rcin_chan_count; i++) {
-                pwm_input[i] = 1000 + _sitl->state.rcin[i]*1000;
-            }
-        }
     }
 
     // output JSON state to ride along flight controllers
     // ride_along.send(_sitl->state,sitl_model->get_position_relhome());
 
-#if HAL_SIM_GIMBAL_ENABLED
+#if AP_SIM_SOLOGIMBAL_ENABLED
     if (gimbal != nullptr) {
         gimbal->update();
     }
-#endif
-#if HAL_SIM_ADSB_ENABLED
+#endif  // AP_SIM_SOLOGIMBAL_ENABLED
+#if AP_SIM_ADSB_ENABLED
     if (adsb != nullptr) {
         adsb->update();
     }
-#endif
+#endif  // AP_SIM_ADSB_ENABLED
+#if AP_SIM_VICON_ENABLED
     if (vicon != nullptr) {
         Quaternion attitude;
         sitl_model->get_attitude(attitude);
@@ -136,6 +155,7 @@ void SIMState::fdm_input_local(void)
                       sitl_model->get_velocity_ef(),
                       attitude);
     }
+#endif  // AP_SIM_VICON_ENABLED
     if (benewake_tf02 != nullptr) {
         benewake_tf02->update(sitl_model->rangefinder_range());
     }
@@ -191,18 +211,12 @@ void SIMState::fdm_input_local(void)
         gyus42v2->update(sitl_model->rangefinder_range());
     }
     if (efi_ms != nullptr) {
-        efi_ms->update();
+        efi_ms->update(*sitl_model);
     }
 
     if (frsky_d != nullptr) {
         frsky_d->update();
     }
-    // if (frsky_sport != nullptr) {
-    //     frsky_sport->update();
-    // }
-    // if (frsky_sportpassthrough != nullptr) {
-    //     frsky_sportpassthrough->update();
-    // }
 
 #if AP_SIM_CRSF_ENABLED
     if (crsf != nullptr) {
@@ -210,19 +224,19 @@ void SIMState::fdm_input_local(void)
     }
 #endif
 
-#if HAL_SIM_PS_RPLIDARA2_ENABLED
+#if AP_SIM_PS_RPLIDARA2_ENABLED
     if (rplidara2 != nullptr) {
         rplidara2->update(sitl_model->get_location());
     }
 #endif
 
-#if HAL_SIM_PS_TERARANGERTOWER_ENABLED
+#if AP_SIM_PS_TERARANGERTOWER_ENABLED
     if (terarangertower != nullptr) {
         terarangertower->update(sitl_model->get_location());
     }
 #endif
 
-#if HAL_SIM_PS_LIGHTWARE_SF45B_ENABLED
+#if AP_SIM_PS_LIGHTWARE_SF45B_ENABLED
     if (sf45b != nullptr) {
         sf45b->update(sitl_model->get_location());
     }
@@ -232,11 +246,19 @@ void SIMState::fdm_input_local(void)
         vectornav->update();
     }
 
-    if (lord != nullptr) {
-        lord->update();
+    if (microstrain5 != nullptr) {
+        microstrain5->update();
     }
+    if (inertiallabs != nullptr) {
+        inertiallabs->update();
+    }
+#if AP_SIM_AERON_ENABLED
+    if (aeron != nullptr) {
+        aeron->update();
+    }
+#endif  // AP_SIM_AERON_ENABLED
 
-#if HAL_SIM_AIS_ENABLED
+#if AP_SIM_AIS_ENABLED
     if (ais != nullptr) {
         ais->update();
     }
@@ -256,37 +278,45 @@ void SIMState::fdm_input_local(void)
 
     set_height_agl();
 
-    _synthetic_clock_mode = true;
     _update_count++;
 }
+#endif  // CONFIG_HAL_BOARD != HAL_BOARD_SITL
 
-/*
-  create sitl_input structure for sending to FDM
- */
-void SIMState::_simulator_servos(struct sitl_input &input)
+#if AP_SIM_WIND_SIMULATION_ENABLED
+void SIMState::update_simulated_wind(struct sitl_input &input)
 {
-    // output at chosen framerate
-    uint32_t now = AP_HAL::micros();
-    // last_update_usec = now;
-
-    // find the barometer object if it exists
-    const auto *_barometer = AP_Baro::get_singleton();
-
-    float altitude = _barometer?_barometer->get_altitude():0;
     float wind_speed = 0;
     float wind_direction = 0;
     float wind_dir_z = 0;
 
+    uint32_t now = AP_HAL::micros();
+
+    if (_sitl == nullptr)  {
+        _sitl = AP::sitl();
+    }
     // give 5 seconds to calibrate airspeed sensor at 0 wind speed
     if (wind_start_delay_micros == 0) {
         wind_start_delay_micros = now;
-    } else if (_sitl && (now - wind_start_delay_micros) > 5000000 ) {
+    } else if ((now - wind_start_delay_micros) > 5000000) {
         // The EKF does not like step inputs so this LPF keeps it happy.
-        wind_speed =     _sitl->wind_speed_active     = (0.95f*_sitl->wind_speed_active)     + (0.05f*_sitl->wind_speed);
-        wind_direction = _sitl->wind_direction_active = (0.95f*_sitl->wind_direction_active) + (0.05f*_sitl->wind_direction);
-        wind_dir_z =     _sitl->wind_dir_z_active     = (0.95f*_sitl->wind_dir_z_active)     + (0.05f*_sitl->wind_dir_z);
-        
+        uint32_t dt_us = now - last_wind_update_us;
+        if (dt_us > 1000) {
+            last_wind_update_us = now;
+            // slew wind based on the configured time constant
+            const float dt = dt_us * 1.0e-6;
+            const float tc = MAX(_sitl->wind_change_tc, 0.1);
+            const float alpha = calc_lowpass_alpha_dt(dt, 1.0/tc);
+            _sitl->wind_speed_active     += (_sitl->wind_speed - _sitl->wind_speed_active) * alpha;
+            _sitl->wind_direction_active += (wrap_180(_sitl->wind_direction - _sitl->wind_direction_active)) * alpha;
+            _sitl->wind_dir_z_active     += (_sitl->wind_dir_z - _sitl->wind_dir_z_active) * alpha;
+            _sitl->wind_direction_active = wrap_180(_sitl->wind_direction_active);
+        }
+        wind_speed =     _sitl->wind_speed_active;
+        wind_direction = _sitl->wind_direction_active;
+        wind_dir_z =     _sitl->wind_dir_z_active;
+
         // pass wind into simulators using different wind types via param SIM_WIND_T*.
+        const float altitude = _sitl->state.height_agl;
         switch (_sitl->wind_type) {
         case SITL::SIM::WIND_TYPE_SQRT:
             if (altitude < _sitl->wind_type_alt) {
@@ -309,10 +339,24 @@ void SIMState::_simulator_servos(struct sitl_input &input)
 
     input.wind.speed = wind_speed;
     input.wind.direction = wind_direction;
-    input.wind.turbulence = _sitl?_sitl->wind_turbulance:0;
+    input.wind.turbulence = _sitl->wind_turbulance;
     input.wind.dir_z = wind_dir_z;
+}
+#endif  // AP_SIM_WIND_SIMULATION_ENABLED
 
-    for (uint8_t i=0; i<SITL_NUM_CHANNELS; i++) {
+#if CONFIG_HAL_BOARD != HAL_BOARD_SITL
+/*
+  create sitl_input structure for sending to FDM
+ */
+void SIMState::_simulator_servos(struct sitl_input &input)
+{
+    if (_sitl == nullptr) {
+        return;
+    }
+
+    update_simulated_wind(input);
+
+    for (uint8_t i=0; i<ARRAY_SIZE(pwm_output); i++) {
         if (pwm_output[i] == 0xFFFF) {
             input.servos[i] = 0;
         } else {
@@ -320,12 +364,11 @@ void SIMState::_simulator_servos(struct sitl_input &input)
         }
     }
 
-    if (_sitl != nullptr) {
+    {
         // FETtec ESC simulation support.  Input signals of 1000-2000
         // are positive thrust, 0 to 1000 are negative thrust.  Deeper
         // changes required to support negative thrust - potentially
         // adding a field to input.
-        if (_sitl != nullptr) {
             if (_sitl->fetteconewireesc_sim.enabled()) {
                 _sitl->fetteconewireesc_sim.update_sitl_input_pwm(input);
                 for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
@@ -334,13 +377,25 @@ void SIMState::_simulator_servos(struct sitl_input &input)
                     }
                 }
             }
+    }
+
+#if AP_SIM_VOLZ_ENABLED
+    // update simulation input based on data received via "serial" to
+    // Volz servos:
+    if (_sitl->volz_sim.enabled()) {
+        _sitl->volz_sim.update_sitl_input_pwm(input);
+        for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
+            if (input.servos[i] != 0 && input.servos[i] < 1000) {
+                AP_HAL::panic("Bad input servo value (%u)", input.servos[i]);
+            }
         }
     }
+#endif
 
     float voltage = 0;
     _current = 0;
-    
-    if (_sitl != nullptr) {
+
+    {
         if (_sitl->state.battery_voltage <= 0) {
         } else {
             // FDM provides voltage and current
@@ -387,7 +442,7 @@ void SIMState::set_height_agl(void)
         AP_Terrain *_terrain = AP_Terrain::get_singleton();
         if (_terrain != nullptr &&
             _terrain->height_amsl(location, terrain_height_amsl)) {
-            _sitl->height_agl = _sitl->state.altitude - terrain_height_amsl;
+            _sitl->state.height_agl = _sitl->state.altitude - terrain_height_amsl;
             return;
         }
     }
@@ -395,8 +450,10 @@ void SIMState::set_height_agl(void)
 
     if (_sitl != nullptr) {
         // fall back to flat earth model
-        _sitl->height_agl = _sitl->state.altitude - home_alt;
+        _sitl->state.height_agl = _sitl->state.altitude - home_alt;
     }
 }
 
-#endif  // AP_SIM_ENABLED && CONFIG_HAL_BOARD != HAL_BOARD_SITL
+#endif  // CONFIG_HAL_BOARD != HAL_BOARD_SITL
+
+#endif  // AP_SIM_ENABLED

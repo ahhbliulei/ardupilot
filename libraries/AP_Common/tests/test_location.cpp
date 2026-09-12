@@ -2,31 +2,33 @@
 #include <AP_Common/Location.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_Mission/AP_Mission.h>
 #include <AP_Terrain/AP_Terrain.h>
 #include <GCS_MAVLink/GCS_Dummy.h>
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
-class DummyVehicle {
-public:
-    bool start_cmd(const AP_Mission::Mission_Command& cmd) { return true; };
-    bool verify_cmd(const AP_Mission::Mission_Command& cmd) { return true; };
-    void mission_complete() { };
-    AP_AHRS ahrs{AP_AHRS::FLAG_ALWAYS_USE_EKF};
+AP_AHRS ahrs{AP_AHRS::FLAG_ALWAYS_USE_EKF};
+AP_Terrain terrain;
 
-    AP_Mission mission{
-        FUNCTOR_BIND_MEMBER(&DummyVehicle::start_cmd, bool, const AP_Mission::Mission_Command &),
-        FUNCTOR_BIND_MEMBER(&DummyVehicle::verify_cmd, bool, const AP_Mission::Mission_Command &),
-        FUNCTOR_BIND_MEMBER(&DummyVehicle::mission_complete, void)};
-    AP_Terrain terrain;
-};
-
-const struct AP_Param::GroupInfo        GCS_MAVLINK_Parameters::var_info[] = {
-    AP_GROUPEND
-};
 GCS_Dummy _gcs;
 
-static DummyVehicle vehicle;
+#if AP_MISSION_ENABLED
+// AP_AHRS::set_home writes home to the mission via AP::mission(),
+// which assumes any binary compiled with mission support instantiates
+// an AP_Mission object:
+class DummyMissionHolder {
+public:
+    bool start_command(const AP_Mission::Mission_Command& cmd) { return false; }
+    bool verify_command(const AP_Mission::Mission_Command& cmd) { return false; }
+    void exit_mission() {}
+    AP_Mission mission{
+        FUNCTOR_BIND_MEMBER(&DummyMissionHolder::start_command, bool, const AP_Mission::Mission_Command &),
+        FUNCTOR_BIND_MEMBER(&DummyMissionHolder::verify_command, bool, const AP_Mission::Mission_Command &),
+        FUNCTOR_BIND_MEMBER(&DummyMissionHolder::exit_mission, void)};
+};
+static DummyMissionHolder mission_holder;
+#endif  // AP_MISSION_ENABLED
 
 #define EXPECT_VECTOR2F_EQ(v1, v2)              \
 do {                                        \
@@ -63,7 +65,7 @@ TEST(Location, LatLngWrapping)
         int32_t expected_lat;
         int32_t expected_lng;
     } tests[] {
-        {519634000, 1797560000, Vector2f{0, 100000}, 519634000, -1787860775}
+        {519634000, 1797560000, Vector2f{0, 100000}, 519634000, -1787860777}
     };
 
     for (auto &test : tests) {
@@ -98,7 +100,7 @@ TEST(Location, LocOffsetDouble)
                -353632620, 1491652373,
                Vector2d{4682795.4576701336, 5953662.7673837934},
                Vector2d{4682797.1904749088, 5953664.1586009059},
-               Vector2d{1.7365739867091179,1.2050807},
+               Vector2d{1.7365739,1.4261966},
     };
 
     for (auto &test : tests) {
@@ -111,6 +113,19 @@ TEST(Location, LocOffsetDouble)
         EXPECT_FLOAT_EQ(diff.x, test.expected_pos_change.x);
         EXPECT_FLOAT_EQ(diff.y, test.expected_pos_change.y);
     }
+}
+
+TEST(Location, LocOffset3DDouble)
+{
+    Location loc {
+        -353632620, 1491652373, 60000, Location::AltFrame::ABSOLUTE
+    };
+    // this is ned, so our latitude should change, and our new
+    // location should be above the original:
+    loc.offset(Vector3d{1000, 0, -10});
+    EXPECT_EQ(loc.lat, -353542788);
+    EXPECT_EQ(loc.lng, 1491652373);
+    EXPECT_EQ(loc.alt, 61000);
 }
 
 TEST(Location, Tests)
@@ -200,7 +215,7 @@ TEST(Location, Tests)
         }
     }
     // NO TERRAIN, NO ORIGIN
-    EXPECT_TRUE(vehicle.ahrs.set_home(test_home));
+    EXPECT_TRUE(ahrs.set_home(test_home));
     for (auto current_frame = Location::AltFrame::ABSOLUTE;
          current_frame <= Location::AltFrame::ABOVE_TERRAIN;
          current_frame = static_cast<Location::AltFrame>(
@@ -251,9 +266,9 @@ TEST(Location, Tests)
     }
 
     Vector2f test_vec2;
-    EXPECT_FALSE(test_home.get_vector_xy_from_origin_NE(test_vec2));
+    EXPECT_FALSE(test_home.get_vector_xy_from_origin_NE_cm(test_vec2));
     Vector3f test_vec3;
-    EXPECT_FALSE(test_home.get_vector_from_origin_NEU(test_vec3));
+    EXPECT_FALSE(test_home.get_vector_from_origin_NEU_cm(test_vec3));
 
     Location test_origin = test_home;
     test_origin.offset(2, 2);
@@ -267,8 +282,16 @@ TEST(Location, Tests)
     EXPECT_EQ(0, test_location4.loiter_xtrack);
     EXPECT_TRUE(test_location4.initialised());
 
-    const Location test_location_empty{test_vect, Location::AltFrame::ABOVE_HOME};
-    EXPECT_FALSE(test_location_empty.get_vector_from_origin_NEU(test_vec3));
+    // test set_alt_m API:
+    Location loc = test_home;
+    loc.set_alt_m(1.71, Location::AltFrame::ABSOLUTE);
+    int32_t alt_in_cm_from_m;
+    EXPECT_TRUE(loc.get_alt_cm(Location::AltFrame::ABSOLUTE, alt_in_cm_from_m));
+    EXPECT_EQ(171, alt_in_cm_from_m);
+
+    // can't create a Location using a vector here as there's no origin for the vector to be relative to:
+    // const Location test_location_empty{test_vect, Location::AltFrame::ABOVE_HOME};
+    // EXPECT_FALSE(test_location_empty.get_vector_from_origin_NEU_cm(test_vec3));
 }
 
 TEST(Location, Distance)
@@ -282,8 +305,10 @@ TEST(Location, Distance)
     EXPECT_VECTOR2F_EQ(Vector3f(0, 0, 0), test_home.get_distance_NED(test_home));
     EXPECT_VECTOR2F_EQ(Vector3f(-11.131885, 0, 0), test_home.get_distance_NED(test_home2));
     Location test_loc = test_home;
-    test_loc.offset(-11.131885, 0);
+    test_loc.offset(-11.131886, 0);
     EXPECT_TRUE(test_loc.same_latlon_as(test_home2));
+    test_loc = test_home;
+    test_loc.offset(-11.131885, 0);
     test_loc.offset_bearing(0, 11.131885);
     EXPECT_TRUE(test_loc.same_latlon_as(test_home));
 
@@ -320,7 +345,7 @@ TEST(Location, Sanitize)
     // we will sanitize test_loc with test_default_loc
     // test_home is just for reference
     const Location test_home{-35362938, 149165085, 100, Location::AltFrame::ABSOLUTE};
-    EXPECT_TRUE(vehicle.ahrs.set_home(test_home));
+    EXPECT_TRUE(ahrs.set_home(test_home));
     const Location test_default_loc{-35362938, 149165085, 200, Location::AltFrame::ABSOLUTE};
     Location test_loc;
     test_loc.set_alt_cm(0, Location::AltFrame::ABOVE_HOME);
@@ -344,6 +369,22 @@ TEST(Location, Sanitize)
     EXPECT_NE(test_default_loc.alt, test_loc.alt);
 }
 
+TEST(Location, GetHeightAbove)
+{
+    // we will sanitize test_loc with test_default_loc
+    // test_home is just for reference
+    const Location test_loc{-35362938, 149165085, 37900, Location::AltFrame::ABSOLUTE};
+    const Location test_origin{-35362938, 149165085, 20000, Location::AltFrame::ABSOLUTE};
+
+    ftype alt_delta;
+    EXPECT_EQ(true, test_loc.get_height_above(test_origin, alt_delta));
+    EXPECT_FLOAT_EQ(179, alt_delta);
+
+    EXPECT_EQ(true, test_origin.get_height_above(test_loc, alt_delta));
+    EXPECT_FLOAT_EQ(-179, alt_delta);
+}
+
+
 TEST(Location, Line)
 {
     const Location test_home{35362938, 149165085, 100, Location::AltFrame::ABSOLUTE};
@@ -356,7 +397,7 @@ TEST(Location, Line)
 }
 
 /*
-  check if we obey basic euclidian geometry rules of position
+  check if we obey basic euclidean geometry rules of position
   addition/subtraction
  */
 TEST(Location, OffsetError)
@@ -373,5 +414,76 @@ TEST(Location, OffsetError)
         EXPECT_FLOAT_EQ(dist, 0);
     }
 }
+
+#define TEST_POLYGON_DISTANCE_POINTS(POLYGON, TEST_POINTS)                       \
+    do {                                                                \
+        for (uint32_t i = 0; i < ARRAY_SIZE(TEST_POINTS); i++) {        \
+            Vector2f direction; \
+            Polygon_closest_distance_point(POLYGON,     \
+                                            ARRAY_SIZE(POLYGON),\
+                                            TEST_POINTS[i].point, direction);\
+            EXPECT_TRUE(fabs(TEST_POINTS[i].distance - direction.length()) <= 1.0f); \
+            EXPECT_TRUE(fabs(degrees(TEST_POINTS[i].direction.angle()) - degrees(direction.angle())) <= 5.0f); \
+        }                                                               \
+    } while(0)
+
+static Vector2f scale_latlon_from_origin(const Vector2l &point)
+{
+    // using some random australian location results in 15m errors.
+    // const Location origin{35362938, 149165085, 0, Location::AltFrame::ABOVE_HOME};
+    const Location origin { 515092732, -1267776, 0, Location::AltFrame::ABOVE_HOME };   // NW corner
+    Location tmp_loc { point.x, point.y, 0, Location::AltFrame::ABOVE_HOME };
+    return origin.get_distance_NE(tmp_loc);
+}
+
+// Center of London (Charing Cross)
+const int32_t CENTER_LAT = static_cast<int32_t>(51.5085 * 1E7); // 515085000
+const int32_t CENTER_LON = static_cast<int32_t>(-0.1257 * 1E7); // -1257000
+
+const int32_t CENTER_NORTH_LAT = static_cast<int32_t>((51.5085  + 0.0003366)* 1E7); // 37.5m from edge
+const int32_t CENTER_EAST_LON = static_cast<int32_t>((-0.1257 + 0.0005388)* 1E7); //  37.5m from edge
+const int32_t CENTER_SOUTH_LAT = static_cast<int32_t>((51.5085 - 0.0003366) * 1E7); // 37.5m from edge
+const int32_t CENTER_WEST_LON = static_cast<int32_t>((-0.1257 - 0.0005388) * 1E7); // 37.5m from edge
+
+// Bounding box coordinates (in 1E7 degrees)
+const int32_t NORTH_WEST_LAT = static_cast<int32_t>((51.5085 + 0.0006732) * 1E7); // 515092732
+const int32_t NORTH_WEST_LON = static_cast<int32_t>((-0.1257 - 0.0010776) * 1E7); // -1267776
+
+const int32_t NORTH_EAST_LAT = static_cast<int32_t>((51.5085 + 0.0006732) * 1E7); // 515092732
+const int32_t NORTH_EAST_LON = static_cast<int32_t>((-0.1257 + 0.0010776) * 1E7); // -1246224
+
+const int32_t SOUTH_WEST_LAT = static_cast<int32_t>((51.5085 - 0.0006732) * 1E7); // 515080268
+const int32_t SOUTH_WEST_LON = static_cast<int32_t>((-0.1257 - 0.0010776) * 1E7); // -1267776
+
+const int32_t SOUTH_EAST_LAT = static_cast<int32_t>((51.5085 - 0.0006732) * 1E7); // 515080268
+const int32_t SOUTH_EAST_LON = static_cast<int32_t>((-0.1257 + 0.0010776) * 1E7); // -1246224
+
+#define CARTESIAN(lat, lng) (scale_latlon_from_origin(Vector2l(lat, lng)))
+// Array of coordinates in cartesian pairs for each corner
+static const Vector2f London_boundary[] {
+    CARTESIAN(NORTH_WEST_LAT, NORTH_WEST_LON), // Northwest corner
+    CARTESIAN(NORTH_EAST_LAT, NORTH_EAST_LON), // Northeast corner
+    CARTESIAN(SOUTH_EAST_LAT, SOUTH_EAST_LON), // Southeast corner
+    CARTESIAN(SOUTH_WEST_LAT, SOUTH_WEST_LON), // Southwest corner
+    CARTESIAN(NORTH_WEST_LAT, NORTH_WEST_LON), // Northwest corner
+};
+
+static const struct {
+    Vector2f point;
+    float distance;
+    Vector2f direction;
+} London_test_points[] = {
+    { CARTESIAN(CENTER_LAT, CENTER_LON), 75.0f, { 0.0f, 75.0f }},
+    { CARTESIAN(CENTER_NORTH_LAT, CENTER_LON), 37.5f, { 37.5f, 0.0f }},
+    { CARTESIAN(CENTER_LAT, CENTER_EAST_LON), 37.5f, { 0.0f, 37.5f }},
+    { CARTESIAN(CENTER_SOUTH_LAT, CENTER_LON), 37.5f, { -37.5f, 0.0f }},
+    { CARTESIAN(CENTER_LAT, CENTER_WEST_LON), 37.5f, { 0.0f, -37.5f }},
+};
+
+TEST(Location, London_distance)
+{
+    TEST_POLYGON_DISTANCE_POINTS(London_boundary, London_test_points);
+}
+
 
 AP_GTEST_MAIN()

@@ -19,7 +19,9 @@
 #include <AP_HAL/AP_HAL.h>
 #include "AP_HAL_ChibiOS_Namespace.h"
 #include "AP_HAL_ChibiOS.h"
+#include "USB_MSD.h"
 #include <ch.h>
+#include <AP_Logger/AP_Logger_config.h>
 
 class ExpandingString;
 
@@ -30,29 +32,22 @@ class ExpandingString;
 #define HAL_ENABLE_SAVE_PERSISTENT_PARAMS (defined(STM32F7) || defined(STM32H7))
 #endif
 
-#ifndef AP_BOOTLOADER_FLASHING_ENABLED
-#define AP_BOOTLOADER_FLASHING_ENABLED 0
-#endif
-
 class ChibiOS::Util : public AP_HAL::Util {
 public:
     static Util *from(AP_HAL::Util *util) {
         return static_cast<Util*>(util);
     }
 
-    bool run_debug_shell(AP_HAL::BetterStream *stream) override { return false; }
     uint32_t available_memory() override;
+
+    // get path to custom defaults file for AP_Param
+    const char* get_custom_defaults_file() const override {
+        return "@ROMFS/defaults.parm";
+    }
 
     // Special Allocation Routines
     void *malloc_type(size_t size, AP_HAL::Util::Memory_Type mem_type) override;
     void free_type(void *ptr, size_t size, AP_HAL::Util::Memory_Type mem_type) override;
-
-#ifdef ENABLE_HEAP
-    // heap functions, note that a heap once alloc'd cannot be dealloc'd
-    virtual void *allocate_heap_memory(size_t size) override;
-    virtual void *heap_realloc(void *heap, void *ptr, size_t old_size, size_t new_size) override;
-    virtual void *std_realloc(void *ptr, size_t new_size) override;
-#endif // ENABLE_HEAP
 
     /*
       return state of safety switch, if applicable
@@ -72,6 +67,10 @@ public:
 
     // return true if the reason for the reboot was a watchdog reset
     bool was_watchdog_reset() const override;
+
+#if AP_REBOOT_MASS_STORAGE_ENABLED && HAL_USB_MSD_BOOT_ENABLED
+    bool request_usb_msd() override;
+#endif
 
 #if CH_DBG_ENABLE_STACK_CHECK == TRUE
     // request information on running threads
@@ -97,8 +96,14 @@ public:
 #endif
 #if HAL_UART_STATS_ENABLED
     // request information on uart I/O
-    virtual void uart_info(ExpandingString &str) override;
+    void uart_info(ExpandingString &str) override;
+
+#if HAL_LOGGING_ENABLED
+    // Log UART message for each serial port
+    void uart_log() override;
 #endif
+#endif // HAL_UART_STATS_ENABLED
+
 #if HAL_USE_PWM == TRUE
     void timer_info(ExpandingString &str) override;
 #endif
@@ -135,13 +140,14 @@ private:
     FlashBootloader flash_bootloader() override;
 #endif
 
-#ifdef ENABLE_HEAP
-    static memory_heap_t scripting_heap;
-#endif // ENABLE_HEAP
-
-    // stm32F4 and F7 have 20 total RTC backup registers. We use the first one for boot type
-    // flags, so 19 available for persistent data
-    static_assert(sizeof(persistent_data) <= 19*4, "watchdog persistent data too large");
+    // STM32F4 has 20 total RTC backup registers. We use the first one for boot
+    // flags, leaving 19 registers for the common persistent data ABI.
+    static_assert(sizeof(persistent_data) == 19*4,
+                  "watchdog persistent data layout changed");
+    static_assert(offsetof(AP_HAL::Util::PersistentData, safety_state) == 74,
+                  "watchdog persistent data layout changed");
+    static_assert(offsetof(AP_HAL::Util::PersistentData, boot_to_dfu) == 75,
+                  "bootloader persistent data layout changed");
 
 #if HAL_ENABLE_SAVE_PERSISTENT_PARAMS
     // save/load key persistent parameters in bootloader sector
@@ -157,7 +163,21 @@ private:
     void* last_crash_dump_ptr() const override;
 #endif
 
+    // get the system load
+    bool get_system_load(float& avg_load, float& peak_load) const override;
+
 #if HAL_ENABLE_DFU_BOOT
     void boot_to_dfu() override;
+#endif
+
+#if HAL_UART_STATS_ENABLED
+    struct uart_stats {
+        AP_HAL::UARTDriver::StatsTracker serial[HAL_UART_NUM_SERIAL_PORTS];
+        uint32_t last_ms;
+    };
+    uart_stats sys_uart_stats;
+#if HAL_LOGGING_ENABLED
+    uart_stats log_uart_stats;
+#endif
 #endif
 };

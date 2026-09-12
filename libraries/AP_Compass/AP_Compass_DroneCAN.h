@@ -10,15 +10,16 @@
 
 class AP_Compass_DroneCAN : public AP_Compass_Backend {
 public:
-    AP_Compass_DroneCAN(AP_DroneCAN* ap_dronecan, uint8_t node_id, uint8_t sensor_id, uint32_t devid);
+    AP_Compass_DroneCAN(AP_DroneCAN* ap_dronecan, uint32_t devid);
 
-    void        read(void) override;
-
-    static void subscribe_msgs(AP_DroneCAN* ap_dronecan);
+    static bool subscribe_msgs(AP_DroneCAN* ap_dronecan);
     static AP_Compass_Backend* probe(uint8_t index);
     static uint32_t get_detected_devid(uint8_t index) { return _detected_modules[index].devid; }
     static void handle_magnetic_field(AP_DroneCAN *ap_dronecan, const CanardRxTransfer& transfer, const uavcan_equipment_ahrs_MagneticFieldStrength& msg);
     static void handle_magnetic_field_2(AP_DroneCAN *ap_dronecan, const CanardRxTransfer& transfer, const uavcan_equipment_ahrs_MagneticFieldStrength2 &msg);
+#if AP_COMPASS_DRONECAN_HIRES_ENABLED
+    static void handle_magnetic_field_hires(AP_DroneCAN *ap_dronecan, const CanardRxTransfer& transfer, const dronecan_sensors_magnetometer_MagneticFieldStrengthHiRes &msg);
+#endif
 
 private:
     bool init();
@@ -30,9 +31,6 @@ private:
 
     uint8_t  _instance;
 
-    AP_DroneCAN* _ap_dronecan;
-    uint8_t _node_id;
-    uint8_t _sensor_id;
     uint32_t _devid;
 
     // Module Detection Registry
@@ -42,7 +40,7 @@ private:
         uint8_t sensor_id;
         AP_Compass_DroneCAN *driver;
         uint32_t devid;
-    } _detected_modules[COMPASS_MAX_BACKEND];
+    } _detected_modules[MAX_CONNECTED_MAGS];
 
     static HAL_Semaphore _sem_registry;
 };

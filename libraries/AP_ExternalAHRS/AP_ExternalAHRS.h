@@ -13,19 +13,20 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 /*
-  suppport for serial connected AHRS systems
+  support for serial connected AHRS systems
  */
 
 #pragma once
 
 #include "AP_ExternalAHRS_config.h"
 
-#if HAL_EXTERNAL_AHRS_ENABLED
+#if AP_EXTERNAL_AHRS_ENABLED
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Param/AP_Param.h>
 #include <AP_Common/Location.h>
 #include <AP_NavEKF/AP_Nav_Common.h>
+#include <AP_GPS/AP_GPS_FixType.h>
 
 class AP_ExternalAHRS_backend;
 
@@ -33,7 +34,10 @@ class AP_ExternalAHRS {
 
 public:
     friend class AP_ExternalAHRS_backend;
+    friend class AP_ExternalAHRS_SBG;
     friend class AP_ExternalAHRS_VectorNav;
+    friend class AP_ExternalAHRS_SensAItion;
+    friend class AP_ExternalAHRS_Aeron_plx;
 
     AP_ExternalAHRS();
 
@@ -46,8 +50,30 @@ public:
 #if AP_EXTERNAL_AHRS_VECTORNAV_ENABLED
         VecNav = 1,
 #endif
-#if AP_EXTERNAL_AHRS_LORD_ENABLED
-        LORD = 2,
+#if AP_EXTERNAL_AHRS_MICROSTRAIN5_ENABLED
+        MicroStrain5 = 2,
+#endif
+        // 3 reserved for AdNav
+        // 4 reserved for CINS
+#if AP_EXTERNAL_AHRS_INERTIALLABS_ENABLED
+        InertialLabs = 5,
+#endif
+#if AP_EXTERNAL_AHRS_GSOF_ENABLED
+        // Trimble PX-1 RTX uses the GSOF protocol.
+        GSOF = 6,
+#endif
+#if AP_EXTERNAL_AHRS_MICROSTRAIN7_ENABLED
+        MicroStrain7 = 7,
+#endif
+#if AP_EXTERNAL_AHRS_SBG_ENABLED
+        SBG = 8,
+#endif
+        // 9 reserved for EulerNav
+#if AP_EXTERNAL_AHRS_AERON_PLX_ENABLED
+        Aeron = 10,
+#endif  // AP_EXTERNAL_AHRS_AERON_PLX_ENABLED
+#if AP_EXTERNAL_AHRS_SENSAITION_ENABLED
+        SensAItion = 11,
 #endif
     };
 
@@ -78,7 +104,7 @@ public:
 
         Vector3f accel;
         Vector3f gyro;
-        Quaternion quat;
+        Quaternion quat; // NED
         Location location;
         Vector3f velocity;
         Location origin;
@@ -87,6 +113,8 @@ public:
         bool have_origin;
         bool have_location;
         bool have_velocity;
+
+        uint32_t last_location_update_us;
     } state;
 
     // accessors for AP_AHRS
@@ -95,15 +123,16 @@ public:
     bool initialised(void) const;
     bool get_quaternion(Quaternion &quat);
     bool get_origin(Location &loc);
+    bool set_origin(const Location &loc);
     bool get_location(Location &loc);
     Vector2f get_groundspeed_vector();
     bool get_velocity_NED(Vector3f &vel);
     bool get_speed_down(float &speedD);
     bool pre_arm_check(char *failure_msg, uint8_t failure_msg_len) const;
     void get_filter_status(nav_filter_status &status) const;
-    Vector3f get_gyro(void);
-    Vector3f get_accel(void);
-    void send_status_report(class GCS_MAVLINK &link) const;
+    bool get_gyro(Vector3f &gyro);
+    bool get_accel(Vector3f &accel);
+    bool get_variances(float &velVar, float &posVar, float &hgtVar, Vector3f &magVar, float &tasVar) const;
 
     // update backend
     void update();
@@ -118,13 +147,13 @@ public:
     } baro_data_message_t;
 
     typedef struct {
-        Vector3f field;
+        Vector3f field; // Magnetic flux density (mgauss)
     } mag_data_message_t;
 
     typedef struct {
-        uint16_t gps_week;                   // GPS week, 0xFFFF if not available
+        uint16_t gps_week;
         uint32_t ms_tow;
-        uint8_t  fix_type;
+        AP_GPS_FixType  fix_type;
         uint8_t  satellites_in_view;
         float horizontal_pos_accuracy;
         float vertical_pos_accuracy;
@@ -145,10 +174,27 @@ public:
         float temperature;
     } ins_data_message_t;
 
+    typedef struct {
+        float differential_pressure; // Pa
+        float temperature; // degC
+    } airspeed_data_message_t;
+
+    // set GNSS disable for auxillary function GPS_DISABLE
+    void set_gnss_disable(bool disable) {
+        gnss_is_disabled = disable;
+    }
+
+    // check if a sensor type is enabled
+    bool has_sensor(AvailableSensor sensor) const {
+        return (uint16_t(sensors.get()) & uint16_t(sensor)) != 0;
+    }
+
 protected:
 
     enum class OPTIONS {
         VN_UNCOMP_IMU = 1U << 0,
+        SBG_EKF_AS_GNSS = 1U << 1,
+        SENSAITION_INS = 1U << 2,
     };
     bool option_is_set(OPTIONS option) const { return (options.get() & int32_t(option)) != 0; }
 
@@ -157,20 +203,26 @@ private:
 
     AP_Enum<DevType> devtype;
     AP_Int16         rate;
+    AP_Int16         log_rate;
     AP_Int16         options;
     AP_Int16         sensors;
 
     static AP_ExternalAHRS *_singleton;
 
-    // check if a sensor type is enabled
-    bool has_sensor(AvailableSensor sensor) const {
-        return (uint16_t(sensors.get()) & uint16_t(sensor)) != 0;
+    // set default of EAHRS_SENSORS
+    void set_default_sensors(uint16_t _sensors) {
+        sensors.set_default(_sensors);
     }
+
+    uint32_t last_log_ms;
+
+    // true when user has disabled the GNSS
+    bool gnss_is_disabled;
 };
 
 namespace AP {
     AP_ExternalAHRS &externalAHRS();
 };
 
-#endif  // HAL_EXTERNAL_AHRS_ENABLED
+#endif  // AP_EXTERNAL_AHRS_ENABLED
 

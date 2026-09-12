@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <AP_HAL/AP_HAL.h>
 #include <SRV_Channel/SRV_Channel.h>
+#include <AP_Logger/AP_Logger.h>
 
 #include "AP_MotorsHeli_Swash.h"
 
@@ -44,6 +45,15 @@ const AP_Param::GroupInfo AP_MotorsHeli_Swash::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("LIN_SVO", 3, AP_MotorsHeli_Swash, _linear_swash_servo, 0),
 
+    // @Param: PHANG
+    // @DisplayName: Swashplate Phase Angle Compensation
+    // @Description: Phase angle compensation can be used to correct control coupling issues.  If pitching the swash forward induces a roll, this can be correct the problem.
+    // @Range: -30 30
+    // @Units: deg
+    // @User: Advanced
+    // @Increment: 1
+    AP_GROUPINFO("PHANG", 9, AP_MotorsHeli_Swash, _phase_angle, 0),
+   
     // @Param: H3_ENABLE
     // @DisplayName: Enable Generic H3 Swashplate Settings
     // @Description: Automatically set when H3 generic swash type is selected. Do not set manually.
@@ -74,26 +84,16 @@ const AP_Param::GroupInfo AP_MotorsHeli_Swash::var_info[] = {
     // @Units: deg
     // @User: Advanced
     AP_GROUPINFO("H3_SV3_POS", 7, AP_MotorsHeli_Swash, _servo3_pos, 180),
+
+    // index 8 was previously used for H3 phase angle, but this has been moved to index 9 to allow the use for all swashplate types.
     
-    // @Param: H3_PHANG
-    // @DisplayName: Swashplate Phase Angle Compensation
-    // @Description: Only for H3 swashplate.  If pitching the swash forward induces a roll, this can be correct the problem
-    // @Range: -30 30
-    // @Units: deg
-    // @User: Advanced
-    // @Increment: 1
-    AP_GROUPINFO("H3_PHANG", 8, AP_MotorsHeli_Swash, _phase_angle, 0),
-   
     AP_GROUPEND
 };
 
-AP_MotorsHeli_Swash::AP_MotorsHeli_Swash(uint8_t mot_0, uint8_t mot_1, uint8_t mot_2, uint8_t mot_3)
+AP_MotorsHeli_Swash::AP_MotorsHeli_Swash(uint8_t mot_0, uint8_t mot_1, uint8_t mot_2, uint8_t mot_3, uint8_t instance) :
+    _motor_num{mot_0, mot_1, mot_2, mot_3},
+    _instance(instance)
 {
-    _motor_num[0] = mot_0;
-    _motor_num[1] = mot_1;
-    _motor_num[2] = mot_2;
-    _motor_num[3] = mot_3;
-
     AP_Param::setup_object_defaults(this, var_info);
 }
 
@@ -122,68 +122,79 @@ void AP_MotorsHeli_Swash::calculate_roll_pitch_collective_factors()
 
     switch (_swash_type) {
         case SWASHPLATE_TYPE_H3:
+            {
             // Three-servo roll/pitch mixer for adjustable servo position
             // can be any style swashplate, phase angle is adjustable
-            add_servo_angle(CH_1, _servo1_pos - _phase_angle, 1.0);
-            add_servo_angle(CH_2, _servo2_pos - _phase_angle, 1.0);
-            add_servo_angle(CH_3, _servo3_pos - _phase_angle, 1.0);
+            add_servo_angle(CH_1, 1.0, _servo1_pos, 1.0);
+            add_servo_angle(CH_2, 1.0, _servo2_pos, 1.0);
+            add_servo_angle(CH_3, 1.0, _servo3_pos, 1.0);
             break;
-
+            }
         case SWASHPLATE_TYPE_H1:
-            // CCPM mixing not being used, so H1 straight outputs
-            add_servo_raw(CH_1, 1.0, 0.0, 0.0);
-            add_servo_raw(CH_2, 0.0, 1.0, 0.0);
+            {
+            // CCPM mixing not being used, so H1 straight outputs. phase angle is adjustable
+            add_servo_angle(CH_1, 1.0, -90.0, 0.0);
+            add_servo_angle(CH_2, 1.0, 0.0, 0.0);
             add_servo_raw(CH_3, 0.0, 0.0, 1.0);
             break;
-
+            }
 
         case SWASHPLATE_TYPE_H3_140:
+            {
             // Three-servo roll/pitch mixer for H3-140
             // HR3-140 uses reversed servo and collective direction in heli setup
-            // 1:1 pure input style, phase angle not adjustable
-            add_servo_raw(CH_1,  1.0,  1.0, 1.0);
-            add_servo_raw(CH_2, -1.0,  1.0, 1.0);
-            add_servo_raw(CH_3,  0.0, -1.0, 1.0);
+            // 1:1 pure input style, phase angle is adjustable
+            add_servo_angle(CH_1, safe_sqrt(2),  -45.0, 1.0);
+            add_servo_angle(CH_2, safe_sqrt(2),   45.0, 1.0);
+            add_servo_angle(CH_3, 1.0, 180.0, 1.0);
             break;
+            }
 
         case SWASHPLATE_TYPE_H3_120:
+            {
             // three-servo roll/pitch mixer for H3-120
             // HR3-120 uses reversed servo and collective direction in heli setup
             // not a pure mixing swashplate, phase angle is adjustable
-            add_servo_angle(CH_1, -60.0, 1.0);
-            add_servo_angle(CH_2,  60.0, 1.0);
-            add_servo_angle(CH_3, 180.0, 1.0);
+            add_servo_angle(CH_1, 1.0, -60.0, 1.0);
+            add_servo_angle(CH_2, 1.0,  60.0, 1.0);
+            add_servo_angle(CH_3, 1.0, 180.0, 1.0);
             break;
+            }
 
         case SWASHPLATE_TYPE_H4_90:
+            {
             // four-servo roll/pitch mixer for H4-90
-            // 1:1 pure input style, phase angle not adjustable
+            // 1:1 pure input style, phase angle is adjustable
             // servos 3 & 7 are elevator
             // can also be used for all versions of 90 deg three-servo swashplates
-            add_servo_angle(CH_1, -90.0, 1.0);
-            add_servo_angle(CH_2,  90.0, 1.0);
-            add_servo_angle(CH_3, 180.0, 1.0);
-            add_servo_angle(CH_4,   0.0, 1.0);
+            add_servo_angle(CH_1, 1.0, -90.0, 1.0);
+            add_servo_angle(CH_2, 1.0,  90.0, 1.0);
+            add_servo_angle(CH_3, 1.0, 180.0, 1.0);
+            add_servo_angle(CH_4, 1.0,   0.0, 1.0);
             break;
+            }
 
         case SWASHPLATE_TYPE_H4_45:
+            {
             // four-servo roll/pitch mixer for H4-45
-            // 1:1 pure input style, phase angle not adjustable
+            // 1:1 pure input style, phase angle is adjustable
             // for 45 deg plates servos 1&2 are LF&RF, 3&7 are LR&RR.
-            add_servo_angle(CH_1,  -45.0, 1.0);
-            add_servo_angle(CH_2,   45.0, 1.0);
-            add_servo_angle(CH_3, -135.0, 1.0);
-            add_servo_angle(CH_4,  135.0, 1.0);
+            add_servo_angle(CH_1, 1.0,  -45.0, 1.0);
+            add_servo_angle(CH_2, 1.0,   45.0, 1.0);
+            add_servo_angle(CH_3, 1.0, -135.0, 1.0);
+            add_servo_angle(CH_4, 1.0,  135.0, 1.0);
             break;
+            }
     }
 
 }
 
-void AP_MotorsHeli_Swash::add_servo_angle(uint8_t num, float angle, float collective)
+void AP_MotorsHeli_Swash::add_servo_angle(uint8_t num, float scale, float angle, float collective)
 {
+    float phase_angle = constrain_float(_phase_angle, -30, 30);
     add_servo_raw(num,
-                  cosf(radians(angle + 90)),
-                  cosf(radians(angle)),
+                  scale * cosf(radians(angle + 90 - phase_angle)),
+                  scale * cosf(radians(angle - phase_angle)),
                   collective);
 }
 
@@ -200,7 +211,7 @@ void AP_MotorsHeli_Swash::add_servo_raw(uint8_t num, float roll, float pitch, fl
     _collectiveFactor[num] = collective;
 
     // Setup output function
-    SRV_Channel::Aux_servo_function_t function = SRV_Channels::get_motor_function(_motor_num[num]);
+    SRV_Channel::Function function = SRV_Channels::get_motor_function(_motor_num[num]);
     SRV_Channels::set_aux_channel_default(function, _motor_num[num]);
 
     // outputs are defined on a -500 to 500 range for swash servos
@@ -214,8 +225,14 @@ void AP_MotorsHeli_Swash::add_servo_raw(uint8_t num, float roll, float pitch, fl
 // calculates servo output
 void AP_MotorsHeli_Swash::calculate(float roll, float pitch, float collective)
 {
+
+    // Store inputs for logging, store col before col reversal to ensure logging comes out with the correct sign (+/-)
+    _roll_input = roll;
+    _pitch_input = pitch;
+    _collective_input_scaled = collective;
+
     // Collective control direction. Swash moves up for negative collective pitch, down for positive collective pitch
-    if (_collective_direction == COLLECTIVE_DIRECTION_REVERSED){
+    if (_collective_direction == COLLECTIVE_DIRECTION_REVERSED) {
         collective = 1 - collective;
     }
 
@@ -268,7 +285,7 @@ void AP_MotorsHeli_Swash::output()
 void AP_MotorsHeli_Swash::rc_write(uint8_t chan, float swash_in)
 {
     uint16_t pwm = (uint16_t)(1500 + 500 * swash_in);
-    SRV_Channel::Aux_servo_function_t function = SRV_Channels::get_motor_function(chan);
+    SRV_Channel::Function function = SRV_Channels::get_motor_function(chan);
     SRV_Channels::set_output_pwm_trimmed(function, pwm);
 }
 
@@ -283,3 +300,37 @@ uint32_t AP_MotorsHeli_Swash::get_output_mask() const
     }
     return mask;
 }
+
+#if HAL_LOGGING_ENABLED
+// Write SWSH log for this instance of swashplate
+void AP_MotorsHeli_Swash::write_log(float cyclic_scaler, float col_ang_min, float col_ang_max, int16_t col_min, int16_t col_max) const
+{
+    // Calculate the collective contribution to blade pitch angle
+    // Swashplate receives the scaled collective value based on the col_min and col_max params. We have to reverse the scaling here to do the angle calculation.
+    float collective_scalar = ((float)(col_max-col_min))*1e-3;
+    collective_scalar = MAX(collective_scalar, 1e-3);
+    float _collective_input = (_collective_input_scaled - (float)(col_min - 1000)*1e-3) / collective_scalar;
+    float col = (col_ang_max - col_ang_min) * _collective_input + col_ang_min;
+
+    // Calculate the cyclic contribution to blade pitch angle
+    float tcyc = norm(_roll_input, _pitch_input) * cyclic_scaler;
+    float pcyc = _pitch_input * cyclic_scaler;
+    float rcyc = _roll_input * cyclic_scaler;
+
+    // @LoggerMessage: SWSH
+    // @Description: Helicopter swashplate logging
+    // @Field: TimeUS: Time since system startup
+    // @Field: I: Swashplate instance
+    // @Field: Col: Blade pitch angle contribution from collective
+    // @Field: TCyc: Total blade pitch angle contribution from cyclic
+    // @Field: PCyc: Blade pitch angle contribution from pitch cyclic
+    // @Field: RCyc: Blade pitch angle contribution from roll cyclic
+    AP::logger().WriteStreaming("SWSH", "TimeUS,I,Col,TCyc,PCyc,RCyc", "s#dddd", "F-0000", "QBffff",
+                                AP_HAL::micros64(),
+                                _instance,
+                                col,
+                                tcyc,
+                                pcyc,
+                                rcyc);
+}
+#endif

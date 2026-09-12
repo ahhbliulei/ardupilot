@@ -23,12 +23,24 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <type_traits>
+#include <new>
 
 // used to pack structures
 #define PACKED __attribute__((__packed__))
 
+#if !defined(CYGWIN_BUILD)
 // used to weaken symbols
 #define WEAK __attribute__((__weak__))
+#else
+// cygwin cannot properly support weak symbols allegedly due to Windows
+// executable format limitations
+// (see https://www.cygwin.com/faq.html#faq.programming.linker ). fortunately
+// we only use weak symbols for tests and some HAL stuff which SITL and
+// therefore cygwin does not need to override. in the event that overriding is
+// attempted the link will fail with a symbol redefinition error hopefully
+// suggesting that an alternate approach is needed.
+#define WEAK
+#endif
 
 // used to mark a function that may be unused in some builds
 #define UNUSED_FUNCTION __attribute__((unused))
@@ -75,9 +87,6 @@
 #endif
 
 #define NORETURN __attribute__ ((noreturn))
-
-#define ToRad(x) radians(x)	// *pi/180
-#define ToDeg(x) degrees(x)	// *180/pi
 
 /* Declare and implement const and non-const versions of the array subscript
  * operator. The object is treated as an array of type_ values. */
@@ -142,6 +151,11 @@ template<typename s, size_t t> struct assert_storage_size {
     _assert_storage_size<s, sizeof(s), t> _member;
 };
 
+#define ASSERT_STORAGE_SIZE_JOIN( name, line ) ASSERT_STORAGE_SIZE_DO_JOIN( name, line )
+#define ASSERT_STORAGE_SIZE_DO_JOIN( name, line )  name ## line
+#define ASSERT_STORAGE_SIZE(structure, size) \
+    do { assert_storage_size<structure, size> ASSERT_STORAGE_SIZE_JOIN(assert_storage_sizex, __LINE__); (void)ASSERT_STORAGE_SIZE_JOIN(assert_storage_sizex, __LINE__); } while(false)
+
 ////////////////////////////////////////////////////////////////////////////////
 /// @name	Conversions
 ///
@@ -155,15 +169,31 @@ template<typename s, size_t t> struct assert_storage_size {
 */
 bool is_bounded_int32(int32_t value, int32_t lower_bound, int32_t upper_bound);
 
-bool hex_to_uint8(uint8_t a, uint8_t &res);  // return the uint8 value of an ascii hex character
+bool WARN_IF_UNUSED hex_char_to_nibble(uint8_t a, uint8_t &res);  // return the uint8 value of an ascii hex character
+
+/*
+  decode two hex characters into a byte.
+  e.g. hex_twochars_to_uint8("3F", res) -> res = 0x3F
+ */
+bool WARN_IF_UNUSED hex_twochars_to_uint8(const char s[2], uint8_t &res);
+
+/*
+  decode num_pairs pairs of hex characters into bytes at out[]
+ */
+bool WARN_IF_UNUSED hex_charpairs_to_uint8s(const char *s, uint8_t num_pairs, uint8_t *out);
+
+/*
+  decode len hex characters into a uint32_t, treating each character
+  as a nibble (most-significant first).
+  e.g. hex_chars_to_uint32("1A2B", 4, out) -> out = 0x1A2B
+ */
+bool WARN_IF_UNUSED hex_chars_to_uint32(const char *s, uint8_t len, uint32_t &out);
 
 /*
   strncpy without the warning for not leaving room for nul termination
  */
 size_t strncpy_noterm(char *dest, const char *src, size_t n);
 
-// return the numeric value of an ascii hex character
-int16_t char_to_hex(char a);
 
 /*
   Bit manipulation
@@ -179,3 +209,11 @@ template <typename T> void BIT_CLEAR (T& value, uint8_t bitnumber) noexcept {
      ((value) &= ~((T)(1U) << (bitnumber)));
  }
 
+/*
+  See the comments in libraries/AP_Common/c++.cpp
+ */
+#ifndef NEW_NOTHROW
+#define NEW_NOTHROW new(std::nothrow)
+#endif
+
+void * WEAK mem_realloc(void *ptr, size_t old_size, size_t new_size);

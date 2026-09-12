@@ -27,10 +27,11 @@
  * and DroneCAN
  */
 
-#include "AP_OpenDroneID.h"
+#include "AP_OpenDroneID_config.h"
 
 #if AP_OPENDRONEID_ENABLED
 
+#include "AP_OpenDroneID.h"
 #include <AP_HAL/AP_HAL.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_GPS/AP_GPS.h>
@@ -67,7 +68,7 @@ const AP_Param::GroupInfo AP_OpenDroneID::var_info[] = {
     // @Param: OPTIONS
     // @DisplayName: OpenDroneID options
     // @Description: Options for OpenDroneID subsystem
-    // @Bitmask: 0:EnforceArming, 1:AllowNonGPSPosition, 2:LockUASIDOnFirstBasicIDRx
+    // @Bitmask: 0:EnforcePreArmChecks, 1:AllowNonGPSPosition, 2:LockUASIDOnFirstBasicIDRx
     AP_GROUPINFO("OPTIONS", 4, AP_OpenDroneID, _options, 0),
 
     // @Param: BARO_ACC
@@ -132,9 +133,6 @@ void AP_OpenDroneID::set_basic_id() {
     if (pkt_basic_id.id_type != MAV_ODID_ID_TYPE_NONE) {
         return;
     }
-    if (id_len == 0) {
-        load_UAS_ID_from_persistent_memory();
-    }
     if (id_len > 0) {
         // prepare basic id pkt
         uint8_t val = gcs().sysid_this_mav();
@@ -153,8 +151,12 @@ void AP_OpenDroneID::get_persistent_params(ExpandingString &str) const
     if ((pkt_basic_id.id_type == MAV_ODID_ID_TYPE_SERIAL_NUMBER)
         && (_options & LockUASIDOnFirstBasicIDRx)
         && id_len == 0) {
-        GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "OpenDroneID: ID is locked as %s", pkt_basic_id.uas_id);
-        str.printf("DID_UAS_ID=%s\nDID_UAS_ID_TYPE=%u\nDID_UA_TYPE=%u\n", pkt_basic_id.uas_id, pkt_basic_id.id_type, pkt_basic_id.ua_type);
+        static constexpr size_t uas_id_size = sizeof(pkt_basic_id.uas_id);
+        char buffer[uas_id_size+1];
+        memcpy(buffer, pkt_basic_id.uas_id, uas_id_size);
+        buffer[uas_id_size] = '\0'; // make null terminated
+        GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "OpenDroneID: ID is locked as %s", buffer);
+        str.printf("DID_UAS_ID=%s\nDID_UAS_ID_TYPE=%u\nDID_UA_TYPE=%u\n", buffer, pkt_basic_id.id_type, pkt_basic_id.ua_type);
     }
 }
 
@@ -164,8 +166,13 @@ bool AP_OpenDroneID::pre_arm_check(char* failmsg, uint8_t failmsg_len)
 {
     WITH_SEMAPHORE(_sem);
 
-    if (!option_enabled(Options::EnforceArming)) {
+    if (!option_enabled(Options::EnforcePreArmChecks)) {
         return true;
+    }
+
+    if(_enable == 0) {
+        strncpy(failmsg, "DID_ENABLE must be 1", failmsg_len);
+        return false;
     }
 
     if (pkt_basic_id.id_type == MAV_ODID_ID_TYPE_NONE) {
@@ -209,10 +216,12 @@ void AP_OpenDroneID::update()
 
     if ((pkt_basic_id.id_type == MAV_ODID_ID_TYPE_SERIAL_NUMBER)
         && (_options & LockUASIDOnFirstBasicIDRx)
-        && id_len == 0) {
+        && id_len == 0
+        && !bootloader_flashed) {
         hal.util->flash_bootloader();
         // reset the basic id on next set_basic_id call
         pkt_basic_id.id_type = MAV_ODID_ID_TYPE_NONE;
+        bootloader_flashed = true;
     }
 
     set_basic_id();
@@ -220,7 +229,9 @@ void AP_OpenDroneID::update()
     const bool armed = hal.util->get_soft_armed();
     if (armed && !_was_armed) {
         // use arm location as takeoff location
-        AP::ahrs().get_location(_takeoff_location);
+        // if the AHRS can't give us a result it will pass GPS
+        // location in _takeoff_location while returning false:
+        UNUSED_RESULT(AP::ahrs().get_location(_takeoff_location));
     }
     _was_armed = armed;
 
@@ -334,8 +345,8 @@ void AP_OpenDroneID::send_location_message()
     const auto &barometer = AP::baro();
     const auto &gps = AP::gps();
 
-    const AP_GPS::GPS_Status gps_status = gps.status();
-    const bool got_bad_gps_fix = (gps_status < AP_GPS::GPS_Status::GPS_OK_FIX_3D);
+    const AP_GPS_FixType gps_status = gps.status();
+    const bool got_bad_gps_fix = (gps_status < AP_GPS_FixType::FIX_3D);
     const bool armed = hal.util->get_soft_armed();
 
     Location current_location;
@@ -554,7 +565,7 @@ void AP_OpenDroneID::send_operator_id_message()
 */
 MAV_ODID_HOR_ACC AP_OpenDroneID::create_enum_horizontal_accuracy(float accuracy) const
 {
-    // Out of bounds return UKNOWN flag
+    // Out of bounds return UNKNOWN flag
     if (accuracy < 0.0 || accuracy >= 18520.0) {
         return MAV_ODID_HOR_ACC_UNKNOWN;
     }
@@ -595,7 +606,7 @@ MAV_ODID_HOR_ACC AP_OpenDroneID::create_enum_horizontal_accuracy(float accuracy)
 */
 MAV_ODID_VER_ACC AP_OpenDroneID::create_enum_vertical_accuracy(float accuracy) const
 {
-    // Out of bounds return UKNOWN flag
+    // Out of bounds return UNKNOWN flag
     if (accuracy < 0.0 || accuracy >= 150.0) {
         return MAV_ODID_VER_ACC_UNKNOWN;
     }
@@ -630,7 +641,7 @@ MAV_ODID_VER_ACC AP_OpenDroneID::create_enum_vertical_accuracy(float accuracy) c
 */
 MAV_ODID_SPEED_ACC AP_OpenDroneID::create_enum_speed_accuracy(float accuracy) const
 {
-    // Out of bounds return UKNOWN flag
+    // Out of bounds return UNKNOWN flag
     if (accuracy < 0.0 || accuracy >= 10.0) {
         return MAV_ODID_SPEED_ACC_UNKNOWN;
     }
@@ -657,7 +668,7 @@ MAV_ODID_SPEED_ACC AP_OpenDroneID::create_enum_speed_accuracy(float accuracy) co
 */
 MAV_ODID_TIME_ACC AP_OpenDroneID::create_enum_timestamp_accuracy(float accuracy) const
 {
-    // Out of bounds return UKNOWN flag
+    // Out of bounds return UNKNOWN flag
     if (accuracy < 0.0 || accuracy >= 1.5) {
         return MAV_ODID_TIME_ACC_UNKNOWN;
     }
@@ -691,7 +702,7 @@ MAV_ODID_TIME_ACC AP_OpenDroneID::create_enum_timestamp_accuracy(float accuracy)
 }
 
 // make sure value is within limits of remote ID standard
-uint16_t AP_OpenDroneID::create_speed_horizontal(uint16_t speed) const
+float AP_OpenDroneID::create_speed_horizontal(float speed) const
 {
     if (speed > ODID_MAX_SPEED_H) { // constraint function can't be used, because out of range value is invalid
         speed = ODID_INV_SPEED_H;
@@ -701,7 +712,7 @@ uint16_t AP_OpenDroneID::create_speed_horizontal(uint16_t speed) const
 }
 
 // make sure value is within limits of remote ID standard
-int16_t AP_OpenDroneID::create_speed_vertical(int16_t speed) const
+float AP_OpenDroneID::create_speed_vertical(float speed) const
 {
     if (speed > ODID_MAX_SPEED_V) { // constraint function can't be used, because out of range value is invalid
         speed = ODID_INV_SPEED_V;

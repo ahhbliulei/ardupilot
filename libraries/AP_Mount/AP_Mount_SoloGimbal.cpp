@@ -1,5 +1,8 @@
-#include "AP_Mount_SoloGimbal.h"
+#include "AP_Mount_config.h"
+
 #if HAL_SOLO_GIMBAL_ENABLED
+
+#include "AP_Mount_SoloGimbal.h"
 
 #include "SoloGimbal.h"
 #include <AP_Logger/AP_Logger.h>
@@ -26,10 +29,15 @@ void AP_Mount_SoloGimbal::update_fast()
 // update mount position - should be called periodically
 void AP_Mount_SoloGimbal::update()
 {
+    AP_Mount_Backend::update();
+
     // exit immediately if not initialised
     if (!_initialised) {
         return;
     }
+
+    // change to RC_TARGETING mode if RC input has changed
+    set_rctargeting_on_rcinput_change();
 
     // update based on mount mode
     switch(get_mode()) {
@@ -53,26 +61,13 @@ void AP_Mount_SoloGimbal::update()
         case MAV_MOUNT_MODE_MAVLINK_TARGETING:
             // targets are stored while handling the incoming mavlink message
             _gimbal.set_lockedToBody(false);
-            if (mnt_target.target_type == MountTargetType::RATE) {
-                update_angle_target_from_rate(mnt_target.rate_rads, mnt_target.angle_rad);
-            }
             break;
 
         // RC radio manual angle control, but with stabilization from the AHRS
-        case MAV_MOUNT_MODE_RC_TARGETING: {
+        case MAV_MOUNT_MODE_RC_TARGETING:
             _gimbal.set_lockedToBody(false);
-            MountTarget rc_target;
-            get_rc_target(mnt_target.target_type, rc_target);
-            switch (mnt_target.target_type) {
-            case MountTargetType::ANGLE:
-                mnt_target.angle_rad = rc_target;
-                break;
-            case MountTargetType::RATE:
-                mnt_target.rate_rads = rc_target;
-                break;
-            }
+            update_mnt_target_from_rc_target();
             break;
-        }
 
         // point mount to a GPS point given by the mission planner
         case MAV_MOUNT_MODE_GPS_POINT:
@@ -102,6 +97,10 @@ void AP_Mount_SoloGimbal::update()
             // we do not know this mode so do nothing
             break;
     }
+
+    if (mnt_target.target_type == MountTargetType::RATE) {
+        update_angle_target_from_rate(mnt_target.rate_rads, mnt_target.angle_rad);
+    }
 }
 
 // get attitude as a quaternion.  returns true on success
@@ -122,19 +121,26 @@ void AP_Mount_SoloGimbal::handle_gimbal_report(mavlink_channel_t chan, const mav
     _gimbal.update_target(Vector3f{mnt_target.angle_rad.roll, mnt_target.angle_rad.pitch, mnt_target.angle_rad.get_bf_yaw()});
     _gimbal.receive_feedback(chan,msg);
 
+#if HAL_LOGGING_ENABLED
     AP_Logger *logger = AP_Logger::get_singleton();
     if (logger == nullptr) {
         return;
     }
-
-    if(!_params_saved && logger->logging_started()) {
+#endif
+    if(!_params_saved
+#if HAL_LOGGING_ENABLED
+       && logger->logging_started()
+#endif
+        ) {
         _gimbal.fetch_params();       //last parameter save might not be stored in logger so retry
         _params_saved = true;
     }
 
+#if HAL_LOGGING_ENABLED
     if (_gimbal.get_log_dt() > 1.0f/25.0f) {
         _gimbal.write_logs();
     }
+#endif
 }
 
 void AP_Mount_SoloGimbal::handle_param_value(const mavlink_message_t &msg)

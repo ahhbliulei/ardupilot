@@ -85,23 +85,15 @@
 #error "Unsupported MCU for FDCAN"
 #endif
 
-extern AP_HAL::HAL& hal;
+extern const AP_HAL::HAL& hal;
 
 #define STR(x) #x
 #define XSTR(x) STR(x)
-#if defined(STM32H7)
+#if !defined(HAL_LLD_USE_CLOCK_MANAGEMENT)
 static_assert(STM32_FDCANCLK == 80U*1000U*1000U, "FDCAN clock must be 80MHz, got " XSTR(STM32_FDCANCLK));
-#else
-static_assert(STM32_FDCANCLK <= 80U*1000U*1000U, "FDCAN clock must be max 80MHz, got " XSTR(STM32_FDCANCLK));
 #endif
 
 using namespace ChibiOS;
-
-#if HAL_CANMANAGER_ENABLED
-#define Debug(fmt, args...) do { AP::can().log_text(AP_CANManager::LOG_DEBUG, "CANFDIface", fmt, ##args); } while (0)
-#else
-#define Debug(fmt, args...)
-#endif
 
 constexpr CANIface::CanType* const CANIface::Can[];
 static ChibiOS::CANIface* can_ifaces[HAL_NUM_CAN_IFACES];
@@ -169,9 +161,9 @@ static inline void handleCANInterrupt(uint8_t phys_index, uint8_t line_index)
 uint32_t CANIface::FDCANMessageRAMOffset_ = 0;
 
 CANIface::CANIface(uint8_t index) :
-    self_index_(index),
     rx_bytebuffer_((uint8_t*)rx_buffer, sizeof(rx_buffer)),
-    rx_queue_(&rx_bytebuffer_)
+    rx_queue_(&rx_bytebuffer_),
+    self_index_(index)
 {
     if (index >= HAL_NUM_CAN_IFACES) {
          AP_HAL::panic("Bad CANIface index.");
@@ -190,7 +182,7 @@ void CANIface::handleBusOffInterrupt()
     _detected_bus_off = true;
 }
 
-bool CANIface::computeTimings(const uint32_t target_bitrate, Timings& out_timings)
+bool CANIface::computeTimings(const uint32_t target_bitrate, Timings& out_timings) const
 {
     if (target_bitrate < 1) {
         return false;
@@ -245,7 +237,6 @@ bool CANIface::computeTimings(const uint32_t target_bitrate, Timings& out_timing
 
     const uint32_t prescaler = prescaler_bs / (1 + bs1_bs2_sum);
     if ((prescaler < 1U) || (prescaler > 1024U)) {
-        Debug("Timings: No Solution found\n");
         return false;              // No solution
     }
 
@@ -298,9 +289,6 @@ bool CANIface::computeTimings(const uint32_t target_bitrate, Timings& out_timing
         solution = BsPair(bs1_bs2_sum, uint8_t((7 * bs1_bs2_sum - 1) / 8));
     }
 
-    Debug("Timings: quanta/bit: %d, sample point location: %.1f%%\n",
-          int(1 + solution.bs1 + solution.bs2), float(solution.sample_point_permill) / 10.F);
-
     /*
      * Final validation
      * Helpful Python:
@@ -311,16 +299,49 @@ bool CANIface::computeTimings(const uint32_t target_bitrate, Timings& out_timing
      *
      */
     if ((target_bitrate != (pclk / (prescaler * (1 + solution.bs1 + solution.bs2)))) || !solution.isValid()) {
-        Debug("Timings: Invalid Solution %lu %lu %d %d %lu \n", pclk, prescaler, int(solution.bs1), int(solution.bs2), (pclk / (prescaler * (1 + solution.bs1 + solution.bs2))));
         return false;
     }
 
     out_timings.sample_point_permill = solution.sample_point_permill;
-    out_timings.prescaler = uint16_t(prescaler - 1U);
-    out_timings.sjw = 0;                                        // Which means one
-    out_timings.bs1 = uint8_t(solution.bs1 - 1);
-    out_timings.bs2 = uint8_t(solution.bs2 - 1);
+    out_timings.prescaler = uint16_t(prescaler);
+    out_timings.sjw = 1;
+    out_timings.bs1 = uint8_t(solution.bs1);
+    out_timings.bs2 = uint8_t(solution.bs2);
     return true;
+}
+
+/*
+  table driven timings for CANFD
+  These timings are from https://www.kvaser.com/support/calculators/can-fd-bit-timing-calculator
+ */
+bool CANIface::computeFDTimings(const uint32_t target_bitrate, Timings& out_timings) const
+{
+    static const struct {
+        uint8_t bitrate_mbaud;
+        uint8_t prescaler;
+        uint8_t bs1;
+        uint8_t bs2;
+        uint8_t sjw;
+        uint8_t sample_point_pct;
+    } CANFD_timings[] {
+        { 1, 4, 14, 5, 5, 75},
+        { 2, 2, 14, 5, 5, 75},
+        { 4, 1, 14, 5, 5, 75},
+        { 5, 1, 11, 4, 4, 75},
+        { 8, 1,  6, 3, 3, 70},
+    };
+    for (const auto &t : CANFD_timings) {
+        if (t.bitrate_mbaud*1000U*1000U == target_bitrate) {
+            // out_timings has the register bits, which are the actual value minus 1
+            out_timings.prescaler = t.prescaler;
+            out_timings.bs1 = t.bs1;
+            out_timings.bs2 = t.bs2;
+            out_timings.sjw = t.sjw;
+            out_timings.sample_point_permill = t.sample_point_pct*10;
+            return true;
+        }
+    }
+    return false;
 }
 
 int16_t CANIface::send(const AP_HAL::CANFrame& frame, uint64_t tx_deadline,
@@ -347,6 +368,19 @@ int16_t CANIface::send(const AP_HAL::CANFrame& frame, uint64_t tx_deadline,
 
         if ((can_->TXFQS & FDCAN_TXFQS_TFQF) != 0) {
             stats.tx_overflow++;
+#if !defined(HAL_BOOTLOADER_BUILD)
+            if (stats.tx_success == 0) {
+                /*
+                  if we have never successfully transmitted a frame
+                  then we may be operating with just MAVCAN or UDP
+                  MCAST. Consider the frame sent if the send
+                  succeeds. This allows for UDP MCAST and MAVCAN to
+                  operate fully when the CAN bus has no cable plugged
+                  in
+                 */
+                return AP_HAL::CANIface::send(frame, tx_deadline, flags);
+            }
+#endif
             return 0;    //we don't have free space
         }
         index = ((can_->TXFQS & FDCAN_TXFQS_TFQPI) >> FDCAN_TXFQS_TFQPI_Pos);
@@ -419,161 +453,20 @@ int16_t CANIface::receive(AP_HAL::CANFrame& out_frame, uint64_t& out_timestamp_u
     return AP_HAL::CANIface::receive(out_frame, out_timestamp_us, out_flags);
 }
 
-bool CANIface::configureFilters(const CanFilterConfig* filter_configs,
-                                uint16_t num_configs)
-{
-    // only enable filters in AP_Periph. It makes no sense on the flight controller
-#if !defined(HAL_BUILD_AP_PERIPH) || defined(STM32G4)
-    // no filtering
-    can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
-    uint32_t while_start_ms = AP_HAL::millis();
-    while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
-        if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
-            return false;
-        }
-    }
-    initialised_ = true;
-    return true;
-#else
-    uint32_t num_extid = 0, num_stdid = 0;
-    uint32_t total_available_list_size = MAX_FILTER_LIST_SIZE;
-    uint32_t* filter_ptr;
-    if (initialised_ || mode_ != FilteredMode) {
-        // we are already initialised can't do anything here
-        return false;
-    }
-    //count number of frames of each type
-    for (uint8_t i = 0; i < num_configs; i++) {
-        const CanFilterConfig* const cfg = filter_configs + i;
-        if ((cfg->id & AP_HAL::CANFrame::FlagEFF) || !(cfg->mask & AP_HAL::CANFrame::FlagEFF)) {
-            num_extid++;
-        } else {
-            num_stdid++;
-        }
-    }
-    CriticalSectionLocker lock;
-    //Allocate Message RAM for Standard ID Filter List
-    if (num_stdid == 0) { //No Frame with Standard ID is to be accepted
-#if defined(STM32G4)
-        can_->RXGFC |= 0x2; //Reject All Standard ID Frames
-#else
-        can_->GFC |= 0x2; //Reject All Standard ID Frames
-#endif
-    } else if ((num_stdid < total_available_list_size) && (num_stdid <= 128)) {
-        can_->SIDFC = (FDCANMessageRAMOffset_ << 2) | (num_stdid << 16);
-        MessageRam_.StandardFilterSA = SRAMCAN_BASE + (FDCANMessageRAMOffset_ * 4U);
-        FDCANMessageRAMOffset_ += num_stdid;
-        total_available_list_size -= num_stdid;
-        can_->GFC |= (0x3U << 4); //Reject non matching Standard frames
-    } else {    //The List is too big, return fail
-        can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
-        uint32_t while_start_ms = AP_HAL::millis();
-        while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
-            if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
-                return false;
-            }
-        }
-        return false;
-    }
-
-    if (num_stdid) {
-        num_stdid = 0;  //reset list count
-        filter_ptr = (uint32_t*)MessageRam_.StandardFilterSA;
-        //Run through the filter list and setup standard id filter list
-        for (uint8_t i = 0; i < num_configs; i++) {
-            uint32_t id = 0;
-            uint32_t mask = 0;
-            const CanFilterConfig* const cfg = filter_configs + i;
-            if (!((cfg->id & AP_HAL::CANFrame::FlagEFF) || !(cfg->mask & AP_HAL::CANFrame::FlagEFF))) {
-                id   = (cfg->id   & AP_HAL::CANFrame::MaskStdID);  // Regular std frames, nothing fancy.
-                mask = (cfg->mask & 0x7F);
-                filter_ptr[num_stdid] = 0x2U << 30  | //Classic CAN Filter
-                                        0x1U << 27 |  //Store in Rx FIFO0 if filter matches
-                                        id << 16 |
-                                        mask;
-                num_stdid++;
-            }
-        }
-    }
-
-    //Allocate Message RAM for Extended ID Filter List
-    if (num_extid == 0) { //No Frame with Extended ID is to be accepted
-        can_->GFC |= 0x1; //Reject All Extended ID Frames
-    } else if ((num_extid < (total_available_list_size/2)) && (num_extid <= 64)) {
-        can_->XIDFC = (FDCANMessageRAMOffset_ << 2) | (num_extid << 16);
-        MessageRam_.ExtendedFilterSA = SRAMCAN_BASE + (FDCANMessageRAMOffset_ * 4U);
-        FDCANMessageRAMOffset_ += num_extid*2;
-        can_->GFC |= (0x3U << 2); // Reject non matching Extended frames
-    } else {    //The List is too big, return fail
-        can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
-        uint32_t while_start_ms = AP_HAL::millis();
-        while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
-            if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
-                return false;
-            }
-        }
-        return false;
-    }
-
-    if (num_extid) {
-        num_extid = 0;
-        filter_ptr = (uint32_t*)MessageRam_.ExtendedFilterSA;
-        //Run through the filter list and setup extended id filter list
-        for (uint8_t i = 0; i < num_configs; i++) {
-            uint32_t id = 0;
-            uint32_t mask = 0;
-            const CanFilterConfig* const cfg = filter_configs + i;
-            if ((cfg->id & AP_HAL::CANFrame::FlagEFF) || !(cfg->mask & AP_HAL::CANFrame::FlagEFF)) {
-                id   = (cfg->id   & AP_HAL::CANFrame::MaskExtID);
-                mask = (cfg->mask & AP_HAL::CANFrame::MaskExtID);
-                filter_ptr[num_extid*2]       = 0x1U << 29 | id; //Store in Rx FIFO0 if filter matches
-                filter_ptr[num_extid*2 + 1]   = 0x2U << 30 | mask; // Classic CAN Filter
-                num_extid++;
-            }
-        }
-    }
-
-    MessageRam_.EndAddress = SRAMCAN_BASE + (FDCANMessageRAMOffset_ * 4U);
-    if (MessageRam_.EndAddress > MESSAGE_RAM_END_ADDR) {
-        //We are overflowing the limit of Allocated Message RAM
-        AP_HAL::panic("CANFDIface: Message RAM Overflow!");
-    }
-
-    // Finally get out of Config Mode
-    can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
-    uint32_t while_start_ms = AP_HAL::millis();
-    while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
-        if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
-            return false;
-        }
-    }
-    initialised_ = true;
-    return true;
-#endif // AP_Periph, STM32G4
-}
-
-uint16_t CANIface::getNumFilters() const
-{
-    return MAX_FILTER_LIST_SIZE;
-}
-
 bool CANIface::clock_init_ = false;
-bool CANIface::init(const uint32_t bitrate, const uint32_t fdbitrate, const OperatingMode mode)
+bool CANIface::init(const uint32_t bitrate, const uint32_t fdbitrate)
 {
-    Debug("Bitrate %lu mode %d", static_cast<unsigned long>(bitrate), static_cast<int>(mode));
     if (self_index_ > HAL_NUM_CAN_IFACES) {
-        Debug("CAN drv init failed");
         return false;
     }
     if (can_ifaces[self_index_] == nullptr) {
         can_ifaces[self_index_] = this;
 #if !defined(HAL_BOOTLOADER_BUILD)
-        hal.can[self_index_] = this;
+        AP_HAL::get_HAL_mutable().can[self_index_] = this;
 #endif
     }
 
     bitrate_ = bitrate;
-    mode_ = mode;
     //Only do it once
     //Doing it second time will reset the previously initialised bus
     if (!clock_init_) {
@@ -662,17 +555,15 @@ bool CANIface::init(const uint32_t bitrate, const uint32_t fdbitrate, const Oper
         return false;
     }
     _bitrate = bitrate;
-    Debug("Timings: presc=%u sjw=%u bs1=%u bs2=%u\n",
-          unsigned(timings.prescaler), unsigned(timings.sjw), unsigned(timings.bs1), unsigned(timings.bs2));
 
     //setup timing register
-    can_->NBTP = ((timings.sjw << FDCAN_NBTP_NSJW_Pos)   |
-                  (timings.bs1 << FDCAN_NBTP_NTSEG1_Pos) |
-                  (timings.bs2 << FDCAN_NBTP_NTSEG2_Pos)  |
-                  (timings.prescaler << FDCAN_NBTP_NBRP_Pos));
+    can_->NBTP = (((timings.sjw-1) << FDCAN_NBTP_NSJW_Pos)   |
+                  ((timings.bs1-1) << FDCAN_NBTP_NTSEG1_Pos) |
+                  ((timings.bs2-1) << FDCAN_NBTP_NTSEG2_Pos)  |
+                  ((timings.prescaler-1) << FDCAN_NBTP_NBRP_Pos));
 
     if (fdbitrate) {
-        if (!computeTimings(fdbitrate, fdtimings)) {
+        if (!computeFDTimings(fdbitrate, fdtimings)) {
             can_->CCCR &= ~FDCAN_CCCR_INIT;
             uint32_t while_start_ms = AP_HAL::millis();
             while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
@@ -683,11 +574,14 @@ bool CANIface::init(const uint32_t bitrate, const uint32_t fdbitrate, const Oper
             return false;
         }
         _fdbitrate = fdbitrate;
-        Debug("CANFD Timings: presc=%u bs1=%u bs2=%u\n",
-              unsigned(fdtimings.prescaler), unsigned(fdtimings.bs1), unsigned(fdtimings.bs2));
-        can_->DBTP = ((fdtimings.bs1 << FDCAN_DBTP_DTSEG1_Pos) |
-                     (fdtimings.bs2 << FDCAN_DBTP_DTSEG2_Pos)  |
-                     (fdtimings.prescaler << FDCAN_DBTP_DBRP_Pos));
+        can_->DBTP = (((fdtimings.bs1-1) << FDCAN_DBTP_DTSEG1_Pos) |
+                      ((fdtimings.bs2-1) << FDCAN_DBTP_DTSEG2_Pos)  |
+                      ((fdtimings.prescaler-1) << FDCAN_DBTP_DBRP_Pos) |
+                      ((fdtimings.sjw-1) << FDCAN_DBTP_DSJW_Pos)) |
+            FDCAN_DBTP_TDC;
+        // use a transmitter delay compensation offset of 10, suitable
+        // for MCP2557FD transceiver with delay of 120ns
+        can_->TDCR = 10<<FDCAN_TDCR_TDCO_Pos;
     }
 
     //RX Config
@@ -725,20 +619,18 @@ bool CANIface::init(const uint32_t bitrate, const uint32_t fdbitrate, const Oper
     can_->CCCR |= FDCAN_CCCR_FDOE | FDCAN_CCCR_BRSE; // enable sending CAN FD frames, and Bitrate switching
 #endif
 
-    // If mode is Filtered then we finish the initialisation in configureFilter method
-    // otherwise we finish here
-    if (mode != FilteredMode) {
-        can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
-        uint32_t while_start_ms = AP_HAL::millis();
-        while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
-            if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
-                return false;
-            }
+    // finish initialisation here without filters
+    can_->CCCR &= ~FDCAN_CCCR_INIT; // Leave init mode
+    uint32_t while_start_ms = AP_HAL::millis();
+    while ((can_->CCCR & FDCAN_CCCR_INIT) == 1) {
+        if ((AP_HAL::millis() - while_start_ms) > REG_SET_TIMEOUT) {
+            return false;
         }
-
-        //initialised
-        initialised_ = true;
     }
+
+    // initialised
+    initialised_ = true;
+
     return true;
 }
 
@@ -796,6 +688,7 @@ void CANIface::handleTxCompleteInterrupt(const uint64_t timestamp_us)
 
             if (!pending_tx_[i].pushed) {
                 stats.tx_success++;
+                stats.last_transmit_us = timestamp_us;
                 if (pending_tx_[i].canfd_frame) {
                     stats.fdf_tx_success++;
                 }
@@ -811,11 +704,9 @@ void CANIface::handleTxCompleteInterrupt(const uint64_t timestamp_us)
                 rx_item.flags = AP_HAL::CANIface::Loopback;
                 add_to_rx_queue(rx_item);
             }
-            if (event_handle_ != nullptr) {
-                stats.num_events++;
-#if CH_CFG_USE_EVENTS == TRUE
-                evt_src_.signalI(1 << self_index_);
-#endif
+            stats.num_events++;
+            if (sem_handle != nullptr) {
+                sem_handle->signal_ISR();
             }
         }
     }
@@ -924,11 +815,9 @@ void CANIface::handleRxInterrupt(uint8_t fifo_index)
     while (readRxFIFO(fifo_index)) {
         had_activity_ = true;
     }
-    if (event_handle_ != nullptr) {
-        stats.num_events++;
-#if CH_CFG_USE_EVENTS == TRUE
-        evt_src_.signalI(1 << self_index_);
-#endif
+    stats.num_events++;
+    if (sem_handle != nullptr) {
+        sem_handle->signal_ISR();
     }
 }
 
@@ -994,16 +883,11 @@ uint32_t CANIface::getErrorCount() const
            stats.tx_timedout;
 }
 
-#if CH_CFG_USE_EVENTS == TRUE
-ChibiOS::EventSource CANIface::evt_src_;
-bool CANIface::set_event_handle(AP_HAL::EventHandle* handle)
+bool CANIface::set_event_handle(AP_HAL::BinarySemaphore *handle)
 {
-    CriticalSectionLocker lock;
-    event_handle_ = handle;
-    event_handle_->set_source(&evt_src_);
-    return event_handle_->register_event(1 << self_index_);
+    sem_handle = handle;
+    return true;
 }
-#endif
 
 bool CANIface::isRxBufferEmpty() const
 {
@@ -1074,10 +958,10 @@ bool CANIface::select(bool &read, bool &write,
         return true;
     }
     while (time < blocking_deadline) {
-        if (event_handle_ == nullptr) {
+        if (sem_handle == nullptr) {
             break;
         }
-        event_handle_->wait(blocking_deadline - time); // Block until timeout expires or any iface updates
+        IGNORE_RETURN(sem_handle->wait(blocking_deadline - time)); // Block until timeout expires or any iface updates
         checkAvailable(read, write, pending_tx);  // Check what we got
         if ((read && in_read) || (write && in_write)) {
             return true;
@@ -1116,10 +1000,10 @@ void CANIface::get_stats(ExpandingString &str)
                STM32_FDCANCLK/1000000UL,
                _bitrate, unsigned(timings.prescaler),
                unsigned(timings.sjw), unsigned(timings.bs1),
-               unsigned(timings.bs2), timings.sample_point_permill/10.0f,
+               unsigned(timings.bs2), timings.sample_point_permill*0.1f,
                _fdbitrate, unsigned(fdtimings.prescaler),
                unsigned(fdtimings.sjw), unsigned(fdtimings.bs1),
-               unsigned(fdtimings.bs2), timings.sample_point_permill/10.0f,
+               unsigned(fdtimings.bs2), fdtimings.sample_point_permill*0.1f,
                stats.tx_requests,
                stats.tx_rejected,
                stats.tx_overflow,

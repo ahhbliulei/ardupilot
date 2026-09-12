@@ -39,6 +39,11 @@ public:
     int8_t pitch_servo = -1;
     float pitch_min, pitch_max;
 
+    // support for variable-pitch (collective) rotors; the motor's
+    // own servo channel commands blade pitch and rotor speed comes
+    // from a shared rotor-speed-control servo
+    int8_t rsc_servo = -1;
+
     // support for servo slew rate
     enum {SERVO_NORMAL, SERVO_RETRACT} servo_type;
     float servo_rate = 0.24; // seconds per 60 degrees
@@ -46,10 +51,30 @@ public:
     float last_roll_value, last_pitch_value;
 
     Motor(uint8_t _servo, float _angle, float _yaw_factor, uint8_t _display_order) :
-        servo(_servo), // what servo output drives this motor
         angle(_angle), // angle in degrees from front
         yaw_factor(_yaw_factor), // positive is clockwise
+        servo(_servo), // what servo output drives this motor
         display_order(_display_order) // order for clockwise display
+    {
+        position.x = cosf(radians(angle));
+        position.y =  sinf(radians(angle));
+        position.z = 0;
+
+        thrust_vector.x = 0;
+        thrust_vector.y = 0;
+        thrust_vector.z = -1;
+    }
+
+    /*
+      alternative constructor for variable-pitch rotors
+     */
+    Motor(uint8_t _servo, float _angle, float _yaw_factor, uint8_t _display_order,
+          int8_t _rsc_servo) :
+        angle(_angle), // angle in degrees from front
+        yaw_factor(_yaw_factor), // positive is clockwise
+        servo(_servo), // what servo output drives this motor's blade pitch
+        display_order(_display_order), // order for clockwise display
+        rsc_servo(_rsc_servo) // what servo output drives the rotor speed
     {
         position.x = cosf(radians(angle));
         position.y =  sinf(radians(angle));
@@ -66,9 +91,9 @@ public:
     Motor(uint8_t _servo, float _angle, float _yaw_factor, uint8_t _display_order,
           int8_t _roll_servo, float _roll_min, float _roll_max,
           int8_t _pitch_servo, float _pitch_min, float _pitch_max) :
-        servo(_servo), // what servo output drives this motor
         angle(_angle), // angle in degrees from front
         yaw_factor(_yaw_factor), // positive is clockwise
+        servo(_servo), // what servo output drives this motor
         display_order(_display_order), // order for clockwise display
         roll_servo(_roll_servo),
         roll_min(_roll_min),

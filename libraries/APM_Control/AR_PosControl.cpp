@@ -21,8 +21,7 @@
 #include <AP_Logger/AP_Logger.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AC_Avoidance/AC_Avoid.h>
-
-extern const AP_HAL::HAL& hal;
+#include <AC_AttitudeControl/AC_PosControl.h>
 
 #define AR_POSCON_TIMEOUT_MS            100     // timeout after 0.1 sec
 #define AR_POSCON_POS_P                 0.2f    // default position P gain
@@ -34,6 +33,10 @@ extern const AP_HAL::HAL& hal;
 #define AR_POSCON_VEL_FILT              5.0f    // default velocity filter
 #define AR_POSCON_VEL_FILT_D            5.0f    // default velocity D term filter
 #define AR_POSCON_DT                    0.02f   // default dt for PID controllers
+
+extern const AP_HAL::HAL& hal;
+
+AR_PosControl *AR_PosControl::_singleton;
 
 const AP_Param::GroupInfo AR_PosControl::var_info[] = {
 
@@ -54,7 +57,7 @@ const AP_Param::GroupInfo AR_PosControl::var_info[] = {
     // @Param: _VEL_I
     // @DisplayName: Velocity (horizontal) I gain
     // @Description: Velocity (horizontal) I gain.  Corrects long-term difference between desired and actual velocity to a target acceleration
-    // @Range: 0.02 1.00
+    // @Range: 0.00 1.00
     // @Increment: 0.01
     // @User: Advanced
 
@@ -103,6 +106,7 @@ AR_PosControl::AR_PosControl(AR_AttitudeControl& atc) :
     _p_pos(AR_POSCON_POS_P),
     _pid_vel(AR_POSCON_VEL_P, AR_POSCON_VEL_I, AR_POSCON_VEL_D, AR_POSCON_VEL_FF, AR_POSCON_VEL_IMAX, AR_POSCON_VEL_FILT, AR_POSCON_VEL_FILT_D)
 {
+    _singleton = this;
     AP_Param::setup_object_defaults(this, var_info);
 }
 
@@ -110,9 +114,9 @@ AR_PosControl::AR_PosControl(AR_AttitudeControl& atc) :
 void AR_PosControl::update(float dt)
 {
     // exit immediately if no current location, destination or disarmed
-    Vector2f curr_pos_NE;
+    Vector3p curr_pos_NED_m;
     Vector3f curr_vel_NED;
-    if (!hal.util->get_soft_armed() || !AP::ahrs().get_relative_position_NE_origin(curr_pos_NE) ||
+    if (!hal.util->get_soft_armed() || !AP::ahrs().get_relative_position_NED_origin(curr_pos_NED_m) ||
         !AP::ahrs().get_velocity_NED(curr_vel_NED)) {
         _desired_speed = _atc.get_desired_speed_accel_limited(0.0f, dt);
         _desired_lat_accel = 0.0f;
@@ -134,13 +138,15 @@ void AR_PosControl::update(float dt)
     _vel_target.zero();
     if (_pos_target_valid) {
         Vector2p pos_target = _pos_target;
-        _vel_target = _p_pos.update_all(pos_target.x, pos_target.y, curr_pos_NE);
+        _vel_target = _p_pos.update_all(pos_target, curr_pos_NED_m.xy());
     }
 
     // calculation velocity error
+    bool stopping = false;
     if (_vel_desired_valid) {
         // add target velocity to desired velocity from position error
         _vel_target += _vel_desired;
+        stopping = _vel_desired.is_zero();
     }
 
     // limit velocity to maximum speed
@@ -148,6 +154,7 @@ void AR_PosControl::update(float dt)
 
     // Limit the velocity to prevent fence violations
     bool backing_up = false;
+#if AP_AVOIDANCE_ENABLED
     AC_Avoid *avoid = AP::ac_avoid();
     if (avoid != nullptr) {
         Vector3f vel_3d_cms{_vel_target.x * 100.0f, _vel_target.y * 100.0f, 0.0f};
@@ -156,6 +163,7 @@ void AR_PosControl::update(float dt)
         _vel_target.x = vel_3d_cms.x * 0.01;
         _vel_target.y = vel_3d_cms.y * 0.01;
     }
+#endif  // AP_AVOIDANCE_ENABLED
 
     // calculate limit vector based on steering limits
     Vector2f steering_limit_vec;
@@ -189,19 +197,21 @@ void AR_PosControl::update(float dt)
     const Vector2f vel_target_FR = AP::ahrs().earth_to_body2D(_vel_target);
 
     // desired speed is normally the forward component (only) of the target velocity
-    // but we do not let it fall below the minimum turn speed unless the vehicle is slowing down
-    const float abs_des_speed_min = MIN(_vel_target.length(), turn_speed_min);
-    float des_speed;
-    if (_reversed != backing_up) {
-        // if reversed or backing up desired speed will be negative
-        des_speed = MIN(-abs_des_speed_min, vel_target_FR.x);
-    } else {
-        des_speed = MAX(abs_des_speed_min, vel_target_FR.x);
+    float des_speed = vel_target_FR.x;
+    if (!stopping) {
+        // do not let target speed fall below the minimum turn speed unless the vehicle is slowing down
+        const float abs_des_speed_min = MIN(_vel_target.length(), turn_speed_min);
+        if (_reversed != backing_up) {
+            // if reversed or backing up desired speed will be negative
+            des_speed = MIN(-abs_des_speed_min, vel_target_FR.x);
+        } else {
+            des_speed = MAX(abs_des_speed_min, vel_target_FR.x);
+        }
     }
     _desired_speed = _atc.get_desired_speed_accel_limited(des_speed, dt);
 
     // calculate turn rate from desired lateral acceleration
-    _desired_lat_accel = accel_target_FR.y;
+    _desired_lat_accel = stopping ? 0 : accel_target_FR.y;
     _desired_turn_rate_rads = _atc.get_turn_rate_from_lat_accel(_desired_lat_accel, _desired_speed);
 }
 
@@ -240,7 +250,7 @@ bool AR_PosControl::init()
     // get current position and velocity from AHRS
     Vector2f pos_NE;
     Vector3f vel_NED;
-    if (!AP::ahrs().get_relative_position_NE_origin(pos_NE) || !AP::ahrs().get_velocity_NED(vel_NED)) {
+    if (!AP::ahrs().get_relative_position_NE_origin_float(pos_NE) || !AP::ahrs().get_velocity_NED(vel_NED)) {
         return false;
     }
 
@@ -341,7 +351,7 @@ Vector2p AR_PosControl::get_pos_error() const
 {
     // return zero error is not active or no position estimate
     Vector2f curr_pos_NE;
-    if (!is_active() ||!AP::ahrs().get_relative_position_NE_origin(curr_pos_NE)) {
+    if (!is_active() ||!AP::ahrs().get_relative_position_NE_origin_float(curr_pos_NE)) {
         return Vector2p{};
     }
 
@@ -349,6 +359,7 @@ Vector2p AR_PosControl::get_pos_error() const
     return (_pos_target - curr_pos_NE.topostype());
 }
 
+#if HAL_LOGGING_ENABLED
 // write PSC logs
 void AR_PosControl::write_log()
 {
@@ -360,7 +371,7 @@ void AR_PosControl::write_log()
     // exit immediately if no position or velocity estimate
     Vector3f curr_pos_NED;
     Vector3f curr_vel_NED;
-    if (!AP::ahrs().get_relative_position_NED_origin(curr_pos_NED) || !AP::ahrs().get_velocity_NED(curr_vel_NED)) {
+    if (!AP::ahrs().get_relative_position_NED_origin_float(curr_pos_NED) || !AP::ahrs().get_velocity_NED(curr_vel_NED)) {
         return;
     }
 
@@ -370,7 +381,9 @@ void AR_PosControl::write_log()
     // convert position to required format
     Vector2f pos_target_2d_cm = get_pos_target().tofloat() * 100.0;
 
-    AP::logger().Write_PSCN(pos_target_2d_cm.x,     // position target
+    // reuse logging from AC_PosControl:
+    AC_PosControl::Write_PSCN(0.0,                  // position desired
+                            pos_target_2d_cm.x,     // position target
                             curr_pos_NED.x * 100.0, // position
                             _vel_desired.x * 100.0, // desired velocity
                             _vel_target.x * 100.0,  // target velocity
@@ -378,7 +391,8 @@ void AR_PosControl::write_log()
                             _accel_desired.x * 100.0,   // desired accel
                             _accel_target.x * 100.0,    // target accel
                             curr_accel_NED.x);      // accel
-    AP::logger().Write_PSCE(pos_target_2d_cm.y,     // position target
+    AC_PosControl::Write_PSCE(0.0,                  // position desired
+                            pos_target_2d_cm.y,     // position target
                             curr_pos_NED.y * 100.0, // position
                             _vel_desired.y * 100.0, // desired velocity
                             _vel_target.y * 100.0,  // target velocity
@@ -387,26 +401,25 @@ void AR_PosControl::write_log()
                             _accel_target.y * 100.0,    // target accel
                             curr_accel_NED.y);      // accel
 }
+#endif
 
 /// initialise ekf xy position reset check
 void AR_PosControl::init_ekf_xy_reset()
 {
-    Vector2f pos_shift;
-    _ekf_xy_reset_ms = AP::ahrs().getLastPosNorthEastReset(pos_shift);
+    _ekf_xy_reset_count = AP::ahrs().get_position_NE_reset_count();
 }
 
 /// handle_ekf_xy_reset - check for ekf position reset and adjust loiter or brake target position
 void AR_PosControl::handle_ekf_xy_reset()
 {
-    // check for position shift
-    Vector2f pos_shift;
-    uint32_t reset_ms = AP::ahrs().getLastPosNorthEastReset(pos_shift);
-    if (reset_ms != _ekf_xy_reset_ms) {
-        Vector2f pos_NE;
-        if (!AP::ahrs().get_relative_position_NE_origin(pos_NE)) {
+    // check for position reset
+    const uint16_t reset_count = AP::ahrs().get_position_NE_reset_count();
+    if (reset_count != _ekf_xy_reset_count) {
+        Vector2p pos_ne_m;
+        if (!AP::ahrs().get_relative_position_NE_origin(pos_ne_m)) {
             return;
         }
-        _pos_target = (pos_NE + _p_pos.get_error()).topostype();
+        _pos_target = pos_ne_m + _p_pos.get_error().topostype();
 
         Vector3f vel_NED;
         if (!AP::ahrs().get_velocity_NED(vel_NED)) {
@@ -414,6 +427,6 @@ void AR_PosControl::handle_ekf_xy_reset()
         }
         _vel_desired = vel_NED.xy() + _pid_vel.get_error();
 
-        _ekf_xy_reset_ms = reset_ms;
+        _ekf_xy_reset_count = reset_count;
     }
 }

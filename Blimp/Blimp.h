@@ -36,35 +36,35 @@
 // Application dependencies
 #include <AP_Logger/AP_Logger.h>          // ArduPilot Mega Flash Memory Library
 #include <AP_Math/AP_Math.h>            // ArduPilot Mega Vector/Matrix math Library
+#include <AP_Math/SCurve.h>
 // #include <AP_AccelCal/AP_AccelCal.h>                // interface and maths for accelerometer calibration
 // #include <AP_InertialSensor/AP_InertialSensor.h>  // ArduPilot Mega Inertial Sensor (accel & gyro) Library
 #include <AP_AHRS/AP_AHRS.h>
-#include <AP_Stats/AP_Stats.h>     // statistics library
 #include <Filter/Filter.h>             // Filter library
 #include <AP_Vehicle/AP_Vehicle.h>         // needed for AHRS build
-#include <AP_InertialNav/AP_InertialNav.h>     // inertial navigation library
 #include <AP_RCMapper/AP_RCMapper.h>        // RC input mapping library
 #include <AP_BattMonitor/AP_BattMonitor.h>     // Battery monitor library
 #include <AP_Arming/AP_Arming.h>
 #include <AP_Scripting/AP_Scripting.h>
-#include <AC_PID/AC_PID_2D.h>
-#include <AC_PID/AC_PID_Basic.h>
 #include <AC_PID/AC_PID.h>
-#include <AP_Vehicle/AP_MultiCopter.h>
 
 #include <Filter/NotchFilter.h>
+
+#include <AP_Mission/AP_Mission.h>                              // Mission command library
+#include <AP_Mission/AP_Mission_ChangeDetector.h>               // Mission command change detection
 
 // Configuration
 #include "defines.h"
 #include "config.h"
 
 #include "Fins.h"
+#include "Loiter.h"
 
-#include "RC_Channel.h"         // RC Channel Library
+#include "RC_Channel_Blimp.h"         // RC Channel Library
 
-#include "GCS_Mavlink.h"
+#include "GCS_MAVLink_Blimp.h"
 #include "GCS_Blimp.h"
-#include "AP_Arming.h"
+#include "AP_Arming_Blimp.h"
 
 #include <AP_Mount/AP_Mount.h>
 
@@ -91,15 +91,16 @@ public:
     friend class ModeLand;
     friend class ModeVelocity;
     friend class ModeLoiter;
+    friend class ModeRTL;
+    friend class ModeAuto;
+    friend class ModeHold;
 
     friend class Fins;
+    friend class Loiter;
 
     Blimp(void);
 
 private:
-
-    // key aircraft parameters passed to multiple libraries
-    AP_MultiCopter aparm;
 
     // Global parameters are all contained within the 'g' class.
     Parameters g;
@@ -108,21 +109,11 @@ private:
     // primary input control channels
     RC_Channel *channel_right;
     RC_Channel *channel_front;
-    RC_Channel *channel_down;
+    RC_Channel *channel_up;
     RC_Channel *channel_yaw;
-
-    AP_Logger logger;
-
-    // flight modes convenience array
-    AP_Int8 *flight_modes;
-    const uint8_t num_flight_modes = 6;
 
     // Arming/Disarming management class
     AP_Arming_Blimp arming;
-
-    // system time in milliseconds of last recorded yaw reset from ekf
-    uint32_t ekfYawReset_ms;
-    int8_t ekf_primary_core;
 
     // vibration check
     struct {
@@ -147,7 +138,7 @@ private:
             uint8_t logging_started         : 1; // 4       // true if logging has started
             uint8_t land_complete           : 1; // 5       // true if we have detected a landing
             uint8_t new_radio_frame         : 1; // 6       // Set true if we have new PWM data to act on from the Radio
-            uint8_t rc_receiver_present     : 1; // 7       // true if we have an rc receiver present (i.e. if we've ever received an update
+            uint8_t rc_receiver_present_unused     : 1; // 7       // UNUSED
             uint8_t compass_mot             : 1; // 8       // true if we are currently performing compassmot calibration
             uint8_t motor_test              : 1; // 9       // true if we are currently performing the motors test
             uint8_t initialised             : 1; // 10      // true once the init_ardupilot function has completed.  Extended status to GCS is not sent until this completes
@@ -168,12 +159,8 @@ private:
     // There are multiple states defined such as STABILIZE, ACRO,
     Mode::Number control_mode;
     ModeReason control_mode_reason = ModeReason::UNKNOWN;
-    Mode::Number prev_control_mode;
 
     RCMapper rcmap;
-
-    // intertial nav alt when we armed
-    float arming_altitude_m;
 
     // Failsafe
     struct {
@@ -191,6 +178,7 @@ private:
 
     // Motor Output
     Fins *motors;
+    Loiter *loiter;
 
     int32_t _home_bearing;
     uint32_t _home_distance;
@@ -218,30 +206,15 @@ private:
     Vector3f pos_ned;
     float vel_yaw;
     float vel_yaw_filtd;
-    NotchFilterVector2f vel_xy_filter;
+    NotchFilterFloat vel_x_filter;
+    NotchFilterFloat vel_y_filter;
     NotchFilterFloat vel_z_filter;
     NotchFilterFloat vel_yaw_filter;
-
-    // Inertial Navigation
-    AP_InertialNav inertial_nav;
-
-    // Vel & pos PIDs
-    AC_PID_2D pid_vel_xy{3, 0.2, 0, 0, 0.2, 3, 3}; //These are the defaults - P I D FF IMAX FiltHz FiltDHz DT
-    AC_PID_Basic pid_vel_z{7, 1.5, 0, 0, 1, 3, 3};
-    AC_PID_Basic pid_vel_yaw{3, 0.4, 0, 0, 0.2, 3, 3};
-
-    AC_PID_2D pid_pos_xy{1, 0.05, 0, 0, 0.1, 3, 3};
-    AC_PID_Basic pid_pos_z{0.7, 0, 0, 0, 0, 3, 3};
-    AC_PID pid_pos_yaw{1.2, 0.5, 0, 0, 2, 3, 3, 3}; //p, i, d, ff, imax, filt_t, filt_e, filt_d, dt, opt srmax, opt srtau
 
     // System Timers
     // --------------
     // arm_time_ms - Records when vehicle was armed. Will be Zero if we are disarmed.
     uint32_t arm_time_ms;
-
-    // Used to exit the roll and pitch auto trim function
-    uint8_t auto_trim_counter;
-    bool auto_trim_started = false;
 
     // last valid RC input time
     uint32_t last_radio_update_ms;
@@ -309,16 +282,14 @@ private:
     // commands.cpp
     void update_home_from_EKF();
     void set_home_to_current_location_inflight();
-    bool set_home_to_current_location(bool lock) WARN_IF_UNUSED;
-    bool set_home(const Location& loc, bool lock) WARN_IF_UNUSED;
-    bool far_from_EKF_origin(const Location& loc);
+    bool set_home_to_current_location(bool lock) override WARN_IF_UNUSED;
+    bool set_home(const Location& loc, bool lock) override WARN_IF_UNUSED;
 
     // ekf_check.cpp
     void ekf_check();
     bool ekf_over_threshold();
     void failsafe_ekf_event();
     void failsafe_ekf_off_event(void);
-    void check_ekf_reset();
     void check_vibration();
 
     // events.cpp
@@ -348,8 +319,15 @@ private:
     // landing_gear.cpp
     void landinggear_update();
 
+#if HAL_LOGGING_ENABLED
+    // methods for AP_Vehicle:
+    const AP_Int32 &get_log_bitmask() override { return g.log_bitmask; }
+    const struct LogStructure *get_log_structures() const override {
+        return log_structure;
+    }
+    uint8_t get_num_log_structures() const override;
+
     // Log.cpp
-    void Log_Write_Performance();
     void Log_Write_Attitude();
     void Log_Write_PIDs();
     void Log_Write_EKF_POS();
@@ -359,13 +337,12 @@ private:
     void Log_Write_Data(LogDataID id, uint16_t value);
     void Log_Write_Data(LogDataID id, float value);
     void Log_Write_Parameter_Tuning(uint8_t param, float tuning_val, float tune_min, float tune_max);
-    void Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target, const Vector3f& vel_target);
-    void Log_Write_SysID_Setup(uint8_t systemID_axis, float waveform_magnitude, float frequency_start, float frequency_stop, float time_fade_in, float time_const_freq, float time_record, float time_fade_out);
-    void Log_Write_SysID_Data(float waveform_time, float waveform_sample, float waveform_freq, float angle_x, float angle_y, float angle_z, float accel_x, float accel_y, float accel_z);
+
+
     void Log_Write_Vehicle_Startup_Messages();
-    void log_init(void);
     void Write_FINI(float right, float front, float down, float yaw);
     void Write_FINO(float *amp, float *off);
+#endif
 
     // mode.cpp
     bool set_mode(Mode::Number mode, ModeReason reason);
@@ -378,7 +355,7 @@ private:
     void notify_flight_mode();
 
     // mode_land.cpp
-    void set_mode_land_with_pause(ModeReason reason);
+    void set_mode_land_failsafe(ModeReason reason);
     bool landing_with_GPS();
 
     // // motors.cpp
@@ -388,7 +365,6 @@ private:
     // Parameters.cpp
     void load_parameters(void) override;
     void convert_pid_parameters(void);
-    void convert_lgr_parameters(void);
     void convert_fs_options_params(void);
 
     // radio.cpp
@@ -406,11 +382,6 @@ private:
     void read_rangefinder(void);
     bool rangefinder_alt_ok();
     bool rangefinder_up_ok();
-
-    // RC_Channel.cpp
-    void save_trim();
-    void auto_trim();
-    void auto_trim_cancel();
 
     // system.cpp
     void init_ardupilot() override;
@@ -430,6 +401,9 @@ private:
     ModeLand mode_land;
     ModeVelocity mode_velocity;
     ModeLoiter mode_loiter;
+    ModeRTL mode_rtl;
+    ModeAuto mode_auto;
+    ModeHold mode_hold;
 
     // mode.cpp
     Mode *mode_from_mode_num(const Mode::Number mode);

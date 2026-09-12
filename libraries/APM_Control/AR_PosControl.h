@@ -11,6 +11,11 @@ public:
     // constructor
     AR_PosControl(AR_AttitudeControl& atc);
 
+    // do not allow copying
+    CLASS_NO_COPY(AR_PosControl);
+
+    static AR_PosControl *get_singleton() { return _singleton; }
+
     // update navigation
     void update(float dt);
 
@@ -81,6 +86,8 @@ public:
 
 private:
 
+    static AR_PosControl *_singleton;
+
     // initialise and check for ekf position resets
     void init_ekf_xy_reset();
     void handle_ekf_xy_reset();
@@ -119,5 +126,5 @@ private:
     float _desired_lat_accel;       // desired lateral acceleration (for reporting only)
 
     // ekf reset handling
-    uint32_t _ekf_xy_reset_ms;      // system time of last recorded ekf xy position reset
+    uint16_t _ekf_xy_reset_count;      // count of ekf xy position resets
 };

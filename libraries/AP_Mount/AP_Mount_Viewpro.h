@@ -16,9 +16,11 @@
 
 #pragma once
 
-#include "AP_Mount_Backend.h"
+#include "AP_Mount_config.h"
 
 #if HAL_MOUNT_VIEWPRO_ENABLED
+
+#include "AP_Mount_Backend_Serial.h"
 
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
@@ -27,18 +29,15 @@
 
 #define AP_MOUNT_VIEWPRO_PACKETLEN_MAX  63  // maximum number of bytes in a packet sent to or received from the gimbal
 
-class AP_Mount_Viewpro : public AP_Mount_Backend
+class AP_Mount_Viewpro : public AP_Mount_Backend_Serial
 {
 
 public:
     // Constructor
-    using AP_Mount_Backend::AP_Mount_Backend;
+    using AP_Mount_Backend_Serial::AP_Mount_Backend_Serial;
 
     /* Do not allow copies */
     CLASS_NO_COPY(AP_Mount_Viewpro);
-
-    // init - performs any required initialisation for this instance
-    void init() override;
 
     // update mount position - should be called periodically
     void update() override;
@@ -75,13 +74,56 @@ public:
     // p1,p2 are in range 0 to 1.  0 is left or top, 1 is right or bottom
     bool set_tracking(TrackingType tracking_type, const Vector2f& p1, const Vector2f& p2) override;
 
-    // send camera information message to GCS
-    void send_camera_information(mavlink_channel_t chan) const override;
+    // set camera lens as a value from 0 to 5
+    bool set_lens(uint8_t lens) override;
+
+    // set_camera_source is functionally the same as set_lens except primary and secondary lenses are specified by type
+    // primary and secondary sources use the AP_Camera::CameraSource enum cast to uint8_t
+    bool set_camera_source(uint8_t primary_source, uint8_t secondary_source) override;
+
+    bool has_camera_information() const override { return true; }
+    // return camera vendor name
+    void get_camera_vendor_name(char *buf, uint8_t buflen) const override { strncpy(buf, "Viewpro", buflen); }
+    // return camera model name
+    void get_camera_model_name(char *buf, uint8_t buflen) const override {
+        if (!_got_model_name) {
+            return;
+        }
+        strncpy(buf, _model_name, buflen);
+    }
+    // return camera firmware version
+    uint32_t get_camera_firmware_version() const override { return _firmware_version; }
+    // return current camera lens ID
+    uint8_t get_camera_lens_id() const override { return (uint8_t)_image_sensor; }
+    // return camera capability flags
+    uint32_t get_camera_cap_flags() const override {
+        return (CAMERA_CAP_FLAGS_CAPTURE_VIDEO |
+                CAMERA_CAP_FLAGS_CAPTURE_IMAGE |
+                CAMERA_CAP_FLAGS_HAS_BASIC_ZOOM |
+                CAMERA_CAP_FLAGS_HAS_BASIC_FOCUS |
+                CAMERA_CAP_FLAGS_HAS_TRACKING_POINT |
+                CAMERA_CAP_FLAGS_HAS_TRACKING_RECTANGLE);
+    }
 
     // send camera settings message to GCS
     void send_camera_settings(mavlink_channel_t chan) const override;
 
+    //
+    // rangefinder
+    //
+
+    // get rangefinder distance.  Returns true on success
+    bool get_rangefinder_distance(float& distance_m) const override;
+
+    // enable/disable rangefinder.  Returns true on success
+    bool set_rangefinder_enable(bool enable) override;
+
 protected:
+
+    // Viewpro can send either rates or angles
+    uint8_t natively_supported_mount_target_types() const override {
+        return NATIVE_ANGLES_AND_RATES_ONLY;
+    };
 
     // get attitude as a quaternion.  returns true on success
     bool get_attitude_quaternion(Quaternion& att_quat) override;
@@ -94,8 +136,10 @@ private:
     // packet frame ids
     enum class FrameId : uint8_t {
         HANDSHAKE = 0x00,       // handshake sent to gimbal
+        U = 0x01,               // communication configuration control (this packet is sent to gimbal)
+        V = 0x02,               // communication configuration status (this is the reply to U)
         HEARTBEAT = 0x10,       // heartbeat received from gimbal
-        A1 = 0x1A,              // target angles (this packet is sent)
+        A1 = 0x1A,              // target angles (sent)
         C1 = 0x1C,              // camera controls commonly used (sent)
         E1 = 0x1E,              // tracking controls commonly used (sent)
         C2 = 0x2C,              // camera controls infrequently used (sent)
@@ -104,12 +148,18 @@ private:
         M_AHRS = 0xB1,          // vehicle attitude and position (sent)
     };
 
+    // U communication configuration control commands
+    enum class CommConfigCmd : uint8_t {
+        QUERY_FIRMWARE_VER = 0xD0,
+        QUERY_MODEL = 0xE4,
+    };
+
     // A1 servo status enum (used in A1, B1 packets)
     enum class ServoStatus : uint8_t {
-        manual_speed_mode = 0x01,
-        follow_yaw = 0x03,
-        manual_absolute_angle_mode = 0x0B,
-        follow_yaw_disable = 0x0A,
+        MANUAL_SPEED_MODE = 0x01,
+        FOLLOW_YAW = 0x03,
+        MANUAL_ABSOLUTE_ANGLE_MODE = 0x0B,
+        FOLLOW_YAW_DISABLE = 0x0A,
     };
 
     // C1 image sensor choice
@@ -126,7 +176,7 @@ private:
 
     // C1 camera commands
     enum class CameraCommand : uint8_t {
-        NO_ACTION = 0,
+        NO_ACTION = 0x00,
         STOP_FOCUS_AND_ZOOM = 0x01,
         ZOOM_OUT = 0x08,
         ZOOM_IN = 0x09,
@@ -136,12 +186,30 @@ private:
         START_RECORD = 0x14,
         STOP_RECORD = 0x15,
         AUTO_FOCUS = 0x19,
-        MANUAL_FOCUS = 0x1A
+        MANUAL_FOCUS = 0x1A,
+        IR_ZOOM_OUT = 0x1B,
+        IR_ZOOM_IN = 0x1C
+    };
+
+    // C1 rangefinder commands
+    enum class LRFCommand : uint8_t {
+        NO_ACTION = 0x00,
+        SINGLE_RANGING = 0x01,
+        CONTINUOUS_RANGING_START = 0x02,
+        LPCL_CONTINUOUS_RANGING_START = 0x03,
+        STOP_RANGING = 0x05
     };
 
     // C2 camera commands
     enum class CameraCommand2 : uint8_t {
         SET_EO_ZOOM = 0x53
+    };
+
+    // D1 recording status (received from gimbal)
+    enum class RecordingStatus : uint8_t {
+        RECORDING_STOPPED = 0x00,
+        RECORDING = 0x01,
+        PICTURE_MODE = 0x02
     };
 
     // E1 tracking commands
@@ -191,6 +259,17 @@ private:
         struct {
             FrameId frame_id;           // always 0x00
             uint8_t unused;             // always 0x00
+        } content;
+        uint8_t bytes[sizeof(content)];
+    };
+
+    // U packed used to send communication configuration control commands
+    // gimbal replies with V packet
+    union UPacket {
+        struct {
+            FrameId frame_id;           // always 0x01
+            CommConfigCmd control_cmd;  // see CommConfigCmd enum above
+            uint8_t params[9];          // parameters (unused)
         } content;
         uint8_t bytes[sizeof(content)];
     };
@@ -255,8 +334,8 @@ private:
             FrameId frame_id;           // always 0xB1
             uint8_t data_type;          // should be 0x07.  Bit0: Attitude, Bit1: GPS, Bit2 Gyro
             uint8_t unused2to8[7];      // unused
-            be16_t pitch_be;            // vehicle pitch angle.  1bit=360deg/65536
             be16_t roll_be;             // vehicle roll angle.  1bit=360deg/65536
+            be16_t pitch_be;            // vehicle pitch angle.  1bit=360deg/65536
             be16_t yaw_be;              // vehicle yaw angle.  1bit=360deg/65536
             be16_t date_be;             // bit0~6:year, bit7~10:month, bit11~15:day
             uint8_t seconds_utc[3];     // seconds.  1bit = 0.01sec
@@ -291,7 +370,7 @@ private:
     // returns true on success, false if outgoing serial buffer is full
     bool send_packet(const uint8_t* databuff, uint8_t databuff_len);
 
-    // send handshake, gimbal will respond with T1_F1_B1_D1 paket that includes current angles
+    // send handshake, gimbal will respond with T1_F1_B1_D1 packet that includes current angles
     void send_handshake();
 
     // set gimbal's lock vs follow mode
@@ -299,16 +378,17 @@ private:
     // lock is false to follow / maintain a body-frame target
     bool set_lock(bool lock);
 
+    // send communication configuration command (aka U packet), gimbal will respond with a V packet
+    bool send_comm_config_cmd(CommConfigCmd cmd);
+
     // send target pitch and yaw rates to gimbal
-    // yaw_is_ef should be true if yaw_rads target is an earth frame rate, false if body_frame
-    bool send_target_rates(float pitch_rads, float yaw_rads, bool yaw_is_ef);
+    void send_target_rates(const MountRateTarget &rate_rads) override;
 
     // send target pitch and yaw angles to gimbal
-    // yaw_is_ef should be true if yaw_rad target is an earth frame angle, false if body_frame
-    bool send_target_angles(float pitch_rad, float yaw_rad, bool yaw_is_ef);
+    void send_target_angles(const MountAngleTarget &angle_rad) override;
 
-    // send camera command and corresponding value (e.g. zoom speed)
-    bool send_camera_command(CameraCommand cmd, uint8_t value);
+    // send camera command, affected image sensor and value (e.g. zoom speed)
+    bool send_camera_command(ImageSensor img_sensor, CameraCommand cmd, uint8_t value, LRFCommand lrf_cmd = LRFCommand::NO_ACTION);
 
     // send camera command2 and corresponding value (e.g. zoom as absolute value)
     bool send_camera_command2(CameraCommand2 cmd, uint16_t value);
@@ -317,17 +397,15 @@ private:
     bool send_tracking_command(TrackingCommand cmd, uint8_t value);
 
     // send camera command2 and corresponding parameter values
-    bool send_tracking_command2(TrackingCommand2 cmd, uint16_t param1, uint16_t param2);
+    bool send_tracking_command2(TrackingCommand2 cmd, int16_t param1, int16_t param2);
 
     // send vehicle attitude and position to gimbal
     bool send_m_ahrs();
 
     // internal variables
-    AP_HAL::UARTDriver *_uart;                      // uart connected to gimbal
-    bool _initialised;                              // true once the driver has been initialised
     uint8_t _msg_buff[AP_MOUNT_VIEWPRO_PACKETLEN_MAX];  // buffer holding latest bytes from gimbal
     uint8_t _msg_buff_len;                          // number of bytes held in msg buff
-    const uint8_t _msg_buff_data_start = 2;         // data starts at this byte of _msg_buff
+    static constexpr uint8_t _msg_buff_data_start = 2;         // data starts at this byte of _msg_buff
 
     // parser state and unpacked fields
     struct {
@@ -343,9 +421,16 @@ private:
     uint32_t _last_update_ms;                       // system time (in milliseconds) that angle or rate targets were last sent
     Vector3f _current_angle_rad;                    // current angles in radians received from gimbal (x=roll, y=pitch, z=yaw)
     uint32_t _last_current_angle_rad_ms;            // system time _current_angle_rad was updated (used for health reporting)
-    bool _last_record_video;                        // last record_video state sent to gimbal
+    bool _recording;                                // recording status received from gimbal
     bool _last_lock;                                // last lock mode sent to gimbal
     TrackingStatus _last_tracking_status;           // last tracking status received from gimbal (used to notify users)
+    ImageSensor _image_sensor;                      // user selected image sensor (aka camera lens)
+    float _zoom_times;                              // zoom times received from gimbal
+    uint32_t _firmware_version;                     // firmware version from gimbal
+    bool _got_firmware_version;                     // true once we have received the firmware version
+    char _model_name[11] {};                        // model name received from gimbal, always null-terminated
+    bool _got_model_name;                           // true once we have received model name
+    float _rangefinder_dist_m;                      // latest rangefinder distance (in meters)
 };
 
 #endif // HAL_MOUNT_VIEWPRO_ENABLED

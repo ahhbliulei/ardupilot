@@ -1,9 +1,11 @@
+# flake8: noqa
+
 """
 Emit docs in a form acceptable to the old Ardupilot wordpress docs site
 """
 
 from param import known_param_fields, known_units
-from emit import Emit
+from emit import Emit, html_comment_safe
 try:
     from cgi import escape as cescape
 except Exception:
@@ -12,12 +14,14 @@ except Exception:
 
 class HtmlEmit(Emit):
 
+    def output_fname(self):
+        return 'Parameters.html'
+
     def __init__(self, *args, **kwargs):
         Emit.__init__(self, *args, **kwargs)
-        html_fname = 'Parameters.html'
-        self.f = open(html_fname, mode='w')
+        self.f = open(self.output_fname(), mode='w')
         self.preamble = """<!-- Dynamically generated list of documented parameters
-This page was generated using Tools/autotest/param_metadata/param_parse.py
+This page was generated using Tools/autotest/param_metadata/param_parse.py{firmware_metadata}
 
 DO NOT EDIT
 -->
@@ -42,7 +46,14 @@ DO NOT EDIT
         return s
 
     def close(self):
-        self.f.write(self.preamble)
+        firmware_metadata = ''
+        if self.git_sha is not None:
+            firmware_metadata += f'git_sha: {html_comment_safe(self.git_sha)}\n'
+        if self.git_tag is not None:
+            firmware_metadata += f'git_tag: {html_comment_safe(self.git_tag)}\n'
+        if firmware_metadata:
+            firmware_metadata = f'\n\n{firmware_metadata}'
+        self.f.write(self.preamble.format(firmware_metadata=firmware_metadata.rstrip()))
         self.f.write(self.t)
         self.f.close()
 
@@ -54,6 +65,8 @@ DO NOT EDIT
         t = '\n\n<h1>%s</h1>\n' % tag
 
         for param in g.params:
+            if not self.should_emit_param(param):
+                continue
             if not hasattr(param, 'DisplayName') or not hasattr(param, 'Description'):
                 continue
             d = param.__dict__
@@ -65,7 +78,9 @@ DO NOT EDIT
             t += "<ul>\n"
 
             for field in param.__dict__.keys():
-                if field not in ['name', 'DisplayName', 'Description', 'User'] and field in known_param_fields:
+                if not self.should_emit_field(param, field):
+                    continue
+                if field not in ['name', 'DisplayName', 'Description', 'User', 'SortValues'] and field in known_param_fields:
                     if field == 'Values' and Emit.prog_values_field.match(param.__dict__[field]):
                         values = (param.__dict__[field]).split(',')
                         t += "<table><th>Value</th><th>Meaning</th>\n"
@@ -78,7 +93,7 @@ DO NOT EDIT
                     elif field == 'Units':
                         abreviated_units = param.__dict__[field]
                         if abreviated_units != '':
-                            units = known_units[abreviated_units]   # use the known_units dictionary to convert the abreviated unit into a full textual one
+                            units = known_units[abreviated_units]   # use the known_units dictionary to convert the abbreviated unit into a full textual one
                             t += "<li>%s: %s</li>\n" % (field, cescape(units))
                     else:
                         t += "<li>%s: %s</li>\n" % (field, cescape(param.__dict__[field]))

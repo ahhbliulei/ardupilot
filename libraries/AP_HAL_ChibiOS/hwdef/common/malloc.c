@@ -39,6 +39,7 @@
 #define MEM_REGION_FLAG_DMA_OK 1
 #define MEM_REGION_FLAG_FAST   2
 #define MEM_REGION_FLAG_AXI_BUS 4
+#define MEM_REGION_FLAG_ETH_SAFE 8
 
 #ifdef HAL_CHIBIOS_ENABLE_MALLOC_GUARD
 static mutex_t mem_mutex;
@@ -80,18 +81,13 @@ void malloc_init(void)
 #endif
 
 #if defined(STM32H7)
-    // zero first 1k of ITCM. We leave 1k free to avoid addresses
-    // close to nullptr being valid. Zeroing it here means we can
-    // check for changes which indicate a write to an uninitialised
-    // object.  We start at address 0x1 as writing the first byte
-    // causes a fault
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-#if defined(__GNUC__) &&  __GNUC__ >= 10
-#pragma GCC diagnostic ignored "-Wstringop-overflow"
-#endif
-    memset((void*)0x00000001, 0, 1023);
-#pragma GCC diagnostic pop
+    // zero first 1k of ITCM. We leave 1k free to avoid addresses close to
+    // nullptr being valid. Zeroing it here means we can check for changes
+    // which indicate a write to an uninitialised object.
+    for (int addr=0; addr<1024; addr+=4) {
+        // write using assembly so we don't invoke UB dereferencing nullptr
+        __asm__("\tstr %0, [%1]\n\t" : : "r"(0), "r"(addr));
+    }
 #endif
 
     uint8_t i;
@@ -125,8 +121,16 @@ static void *malloc_flags(size_t size, uint32_t flags)
     if (size == 0) {
         return NULL;
     }
-    const uint8_t dma_flags = (MEM_REGION_FLAG_DMA_OK | MEM_REGION_FLAG_AXI_BUS);
-    const uint8_t alignment = (flags&dma_flags?DMA_ALIGNMENT:MIN_ALIGNMENT);
+    const uint8_t dma_flags = (MEM_REGION_FLAG_DMA_OK | MEM_REGION_FLAG_AXI_BUS | MEM_REGION_FLAG_ETH_SAFE);
+    size_t alignment = (flags&dma_flags?DMA_ALIGNMENT:MIN_ALIGNMENT);
+    if (flags & MEM_REGION_FLAG_ETH_SAFE) {
+        // alignment needs to same as size
+        alignment = size;
+        // also size needs to be power of 2, if not return NULL
+        if ((size & (size-1)) != 0) {
+            return NULL;
+        }
+    }
     void *p = NULL;
     uint8_t i;
 
@@ -135,10 +139,14 @@ static void *malloc_flags(size_t size, uint32_t flags)
         size = (size + (DMA_ALIGNMENT-1)) & ~(DMA_ALIGNMENT-1);
     }
 
-    // if no flags are set or this is a DMA request and default heap
-    // is DMA safe then start with default heap
+    // start with default heap if:
+    // - no flags are set, or
+    // - DMA is requested and default heap is DMA safe
+    // - AXI bus is requested and default heap is AXI bus capable(needed when USE_ALT_RAM_MAP places AXI SRAM as region 0)
     if (flags == 0 || (flags == MEM_REGION_FLAG_DMA_OK &&
-                       (memory_regions[0].flags & MEM_REGION_FLAG_DMA_OK))) {
+                       (memory_regions[0].flags & MEM_REGION_FLAG_DMA_OK)) ||
+        (flags == MEM_REGION_FLAG_AXI_BUS &&
+         (memory_regions[0].flags & MEM_REGION_FLAG_AXI_BUS))) {
         p = chHeapAllocAligned(NULL, size, alignment);
         if (p) {
             goto found;
@@ -157,6 +165,10 @@ static void *malloc_flags(size_t size, uint32_t flags)
         }
         if ((flags & MEM_REGION_FLAG_FAST) &&
             !(memory_regions[i].flags & MEM_REGION_FLAG_FAST)) {
+            continue;
+        }
+        if ((flags & MEM_REGION_FLAG_ETH_SAFE) &&
+            !(memory_regions[i].flags & MEM_REGION_FLAG_ETH_SAFE)) {
             continue;
         }
         p = chHeapAllocAligned(&heaps[i], size, alignment);
@@ -372,6 +384,19 @@ void *malloc_axi_sram(size_t size)
 }
 
 /*
+  allocate memory for ethernet DMA
+*/
+void *malloc_eth_safe(size_t size)
+{
+#if defined(STM32H7)
+    return malloc_flags(size, MEM_REGION_FLAG_ETH_SAFE);
+#else
+    (void)size;
+    return NULL;
+#endif
+}
+
+/*
   allocate fast memory
  */
 void *malloc_fastmem(size_t size)
@@ -559,7 +584,7 @@ void __wrap__free_r(void *rptr, void *ptr)
     return free(ptr);
 }
 
-#ifdef USE_POSIX
+#if HAL_USE_FATFS
 /*
   allocation functions for FATFS
  */
@@ -589,4 +614,49 @@ void ff_memfree(void* mblock)
 {
     free(mblock);
 }
-#endif // USE_POSIX
+#endif // HAL_USE_FATFS
+
+/*
+  return true if a memory region is safe for a DMA operation
+ */
+bool mem_is_dma_safe(const void *addr, uint32_t size, bool filesystem_op)
+{
+    (void)filesystem_op;
+#if defined(STM32F1)
+    // F1 is always OK
+    (void)addr;
+    (void)size;
+    return true;
+#else
+    uint32_t flags = MEM_REGION_FLAG_DMA_OK;
+#if defined(STM32H7)
+    if (!filesystem_op) {
+        // use bouncebuffer for all non FS ops on H7
+        return false;
+    }
+    if ((((uint32_t)addr) & 0x1F) != 0 || (size & 0x1F) != 0) {
+        return false;
+    }
+    if (filesystem_op) {
+        flags = MEM_REGION_FLAG_AXI_BUS;
+    }
+#elif defined(STM32F4)
+    if (((uint32_t)addr) & 0x01) {
+        return false;
+    }
+#else
+    if (((uint32_t)addr) & 0x07) {
+        return false;
+    }
+#endif
+    for (uint8_t i=0; i<NUM_MEMORY_REGIONS; i++) {
+        if (memory_regions[i].flags & flags) {
+            if ((uint32_t)addr >= (uint32_t)memory_regions[i].address &&
+                ((uint32_t)addr + size) <= ((uint32_t)memory_regions[i].address + memory_regions[i].size)) {
+                return true;
+            }
+        }
+    }
+    return false;
+#endif // STM32F1
+}

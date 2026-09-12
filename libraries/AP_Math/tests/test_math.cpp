@@ -7,6 +7,7 @@
 #include <AP_gtest.h>
 
 #include <AP_Math/AP_Math.h>
+#include <AP_Math/div1000.h>
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 
@@ -82,13 +83,13 @@ TEST(VectorTest, Rotations)
     TEST_ROTATION(ROTATION_ROLL_315, 1, SQRT_2, 0);
     EXPECT_EQ(ROTATION_MAX, rotation_count) << "All rotations are expect to be tested";
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
-    TEST_ROTATION(ROTATION_CUSTOM_OLD, 1, 1, 1);
-    TEST_ROTATION(ROTATION_MAX, 1, 1, 1);
-#elif CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && defined(HAL_DEBUG_BUILD)
     Vector3F v {1, 1, 1};
     EXPECT_EXIT(v.rotate(ROTATION_CUSTOM_OLD), testing::KilledBySignal(SIGABRT), "AP_InternalError::error_t::bad_rotation");
     EXPECT_EXIT(v.rotate(ROTATION_MAX), testing::KilledBySignal(SIGABRT), "AP_InternalError::error_t::bad_rotation");
+#else
+    TEST_ROTATION(ROTATION_CUSTOM_OLD, 1, 1, 1);
+    TEST_ROTATION(ROTATION_MAX, 1, 1, 1);
 #endif
 }
 
@@ -387,12 +388,12 @@ TEST(MathTest, Constrain)
     EXPECT_EQ(10,    constrain_int32( 0xFFFFFFFFU, 10U, 1200U));
     EXPECT_EQ(1200U, constrain_uint32(0xFFFFFFFFU, 10U, 1200U));
 
-#if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
-    EXPECT_EQ(1.0f, constrain_float(nanf("0x4152"), 1.0f, 1.0f));
-    EXPECT_EQ(1.0f, constrain_value(nanf("0x4152"), 1.0f, 1.0f));
-#elif CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL && defined(HAL_DEBUG_BUILD)
     EXPECT_EXIT(constrain_float(nanf("0x4152"), 1.0f, 1.0f), testing::KilledBySignal(SIGABRT), "AP_InternalError::error_t::cnstring_nan");
     EXPECT_EXIT(constrain_value(nanf("0x4152"), 1.0f, 1.0f), testing::KilledBySignal(SIGABRT), "AP_InternalError::error_t::cnstring_nan");
+#else
+    EXPECT_EQ(1.0f, constrain_float(nanf("0x4152"), 1.0f, 1.0f));
+    EXPECT_EQ(1.0f, constrain_value(nanf("0x4152"), 1.0f, 1.0f));
 #endif
 }
 
@@ -532,8 +533,7 @@ TEST(MathWrapTest, AnglePI)
     EXPECT_NEAR(0.f,     wrap_PI(M_2PI),     accuracy);
     EXPECT_NEAR(0,       wrap_PI(M_PI * 10), accuracy);
     EXPECT_NEAR(-2.1415925025939941f,    wrap_PI(M_PI+1),      accuracy);
-    EXPECT_NEAR(1.f,     wrap_PI(1),     accuracy);
-    EXPECT_NEAR(1.f,     wrap_PI((short)1),     accuracy);
+    EXPECT_NEAR(1.f,     wrap_PI(1.0),     accuracy);
 }
 
 TEST(MathWrapTest, Angle2PI)
@@ -546,8 +546,7 @@ TEST(MathWrapTest, Angle2PI)
     EXPECT_NEAR(0.f,  wrap_2PI(0.f), accuracy);
     EXPECT_NEAR(M_PI, wrap_2PI(-M_PI), accuracy);
     EXPECT_NEAR(0,    wrap_2PI(-M_2PI), accuracy);
-    EXPECT_NEAR(1,    wrap_2PI(1), accuracy);
-    EXPECT_NEAR(1,    wrap_2PI((short)1), accuracy);
+    EXPECT_NEAR(1,    wrap_2PI(1.0), accuracy);
 }
 
 TEST(MathTest, ASin)
@@ -653,6 +652,23 @@ TEST(MathTest, RANDOM16)
     EXPECT_NE(random_value, get_random16());
 }
 
+TEST(MathTest, RAND_FLOAT)
+{
+    // bodgy range checks
+    float lowest_value = 0;
+    float highest_value = 0;
+    for (auto i=0; i<1000; i++) {
+        const auto value = rand_float();
+        lowest_value = MIN(lowest_value, value);
+        highest_value = MAX(highest_value, value);
+    }
+    EXPECT_NEAR(-0.95, lowest_value, 0.05);
+    EXPECT_NEAR(0.95, highest_value, 0.05);
+    EXPECT_GE(lowest_value, -1.0);
+    EXPECT_LE(highest_value, 1.0);
+
+}
+
 TEST(MathTest, VELCORRECTION)
 {
     static constexpr Vector3F pos{1.0f, 1.0f, 0.0f};
@@ -690,6 +706,17 @@ TEST(CRCTest, parity)
     EXPECT_EQ(parity(0b110), 0);
     EXPECT_EQ(parity(0b111), 1);
     EXPECT_EQ(parity(0b11111111), 0);
+}
+
+TEST(MathTest, div1000)
+{
+    for (uint32_t i=0; i<1000000; i++) {
+        uint64_t v;
+        EXPECT_EQ(hal.util->get_random_vals((uint8_t*)&v, sizeof(v)), true);
+        uint64_t v1 = v / 1000ULL;
+        uint64_t v2 = uint64_div1000(v);
+        EXPECT_EQ(v1, v2);
+    }
 }
 
 AP_GTEST_PANIC()

@@ -22,7 +22,7 @@
 
 #if AP_SIM_SHIP_ENABLED
 
-#include <AP_HAL/utility/Socket.h>
+#include <AP_HAL/utility/Socket_native.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_Common/Location.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
@@ -61,6 +61,8 @@ public:
      */
     Vector2f get_ground_speed_adjustment(const Location &loc, float &yaw_rate);
 
+    bool get_location(Location &loc) const;
+
 private:
 
     AP_Int8 enable;
@@ -72,7 +74,11 @@ private:
 
     Location home;
     const char *target_address = "127.0.0.1";
-    const uint16_t target_port = 5762;
+    // SERIAL0's TCP port for *this* SITL instance.  -I moves that port
+    // by ten per instance, so a fixed 5762 only ever reaches instance
+    // zero - from anywhere else the beacon goes to another vehicle, or
+    // nowhere, and ours refuses to arm with "Ship: no beacon".
+    uint16_t target_port = 5762;
 
     bool initialised;
     Ship ship;
@@ -83,8 +89,9 @@ private:
     uint32_t last_report_ms;
     uint32_t last_heartbeat_ms;
 
-    SocketAPM mav_socket { false };
+    SocketAPM_native mav_socket { false };
     bool mavlink_connected;
+    mavlink_status_t mav_status;
 
     void send_report(void);
 };

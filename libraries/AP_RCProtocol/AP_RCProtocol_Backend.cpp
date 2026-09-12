@@ -35,10 +35,7 @@
 
 
 AP_RCProtocol_Backend::AP_RCProtocol_Backend(AP_RCProtocol &_frontend) :
-    frontend(_frontend),
-    rc_input_count(0),
-    last_rc_input_count(0),
-    _num_channels(0)
+    frontend(_frontend)
 {}
 
 bool AP_RCProtocol_Backend::new_input()
@@ -178,9 +175,10 @@ void AP_RCProtocol_Backend::configure_vtx(uint8_t band, uint8_t channel, uint8_t
  */
 void AP_RCProtocol_Backend::log_data(AP_RCProtocol::rcprotocol_t prot, uint32_t timestamp, const uint8_t *data, uint8_t len) const
 {
-#if HAL_LOGGING_ENABLED
+#if HAL_LOGGING_ENABLED && AP_RC_CHANNEL_ENABLED
+
 #if (CONFIG_HAL_BOARD == HAL_BOARD_SITL || CONFIG_HAL_BOARD == HAL_BOARD_LINUX)
-    if (&rc() == nullptr) { // allow running without RC_Channels if we are doing the examples
+    if (RC_Channels::get_singleton() == nullptr) { // allow running without RC_Channels if we are doing the examples
         return;
     }
 #endif
@@ -214,7 +212,7 @@ void AP_RCProtocol_Backend::log_data(AP_RCProtocol::rcprotocol_t prot, uint32_t 
                            u32[0], u32[1], u32[2], u32[3], u32[4],
                            u32[5], u32[6], u32[7], u32[8], u32[9]);
     }
-#endif  // HAL_LOGGING_ENABLED
+#endif  // HAL_LOGGING_ENABLED && AP_RC_CHANNEL_ENABLED
 }
 
 #endif  // AP_RCPROTOCOL_ENABLED

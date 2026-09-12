@@ -42,12 +42,16 @@
 #if CH_CFG_USE_DYNAMIC == TRUE
 
 #include <AP_Logger/AP_Logger.h>
+#include <AP_Math/AP_Math.h>
 #include <AP_Scheduler/AP_Scheduler.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include "hwdef/common/stm32_util.h"
 #include "hwdef/common/flash.h"
 #include "hwdef/common/watchdog.h"
 #include <AP_Filesystem/AP_Filesystem.h>
+#if AP_CRASHDUMP_FATFS_ENABLED
+#include "CrashDump.h"
+#endif
 #include "shared_dma.h"
 #include <AP_Common/ExpandingString.h>
 #include <GCS_MAVLink/GCS.h>
@@ -59,6 +63,10 @@ extern AP_IOMCU iomcu;
 
 using namespace ChibiOS;
 
+#ifndef HAL_MONITOR_THREAD_ENABLED
+#define HAL_MONITOR_THREAD_ENABLED 1
+#endif
+
 extern const AP_HAL::HAL& hal;
 #ifndef HAL_NO_TIMER_THREAD
 THD_WORKING_AREA(_timer_thread_wa, TIMER_THD_WA_SIZE);
@@ -66,7 +74,7 @@ THD_WORKING_AREA(_timer_thread_wa, TIMER_THD_WA_SIZE);
 #ifndef HAL_NO_RCOUT_THREAD
 THD_WORKING_AREA(_rcout_thread_wa, RCOUT_THD_WA_SIZE);
 #endif
-#ifndef HAL_NO_RCIN_THREAD
+#if HAL_RCIN_THREAD_ENABLED
 THD_WORKING_AREA(_rcin_thread_wa, RCIN_THD_WA_SIZE);
 #endif
 #ifndef HAL_USE_EMPTY_IO
@@ -75,8 +83,15 @@ THD_WORKING_AREA(_io_thread_wa, IO_THD_WA_SIZE);
 #ifndef HAL_USE_EMPTY_STORAGE
 THD_WORKING_AREA(_storage_thread_wa, STORAGE_THD_WA_SIZE);
 #endif
-#ifndef HAL_NO_MONITOR_THREAD
+#if HAL_MONITOR_THREAD_ENABLED
 THD_WORKING_AREA(_monitor_thread_wa, MONITOR_THD_WA_SIZE);
+#endif
+
+// while the vehicle is being initialised we expect there to be random
+// delays which may exceed the watchdog timeout.  By default, We pat
+// the watchdog in the timer thread during setup to avoid the watchdog:
+#ifndef AP_HAL_CHIBIOS_IN_EXPECTED_DELAY_WHEN_NOT_INITIALISED
+#define AP_HAL_CHIBIOS_IN_EXPECTED_DELAY_WHEN_NOT_INITIALISED 1
 #endif
 
 Scheduler::Scheduler()
@@ -88,7 +103,7 @@ void Scheduler::init()
     chBSemObjectInit(&_timer_semaphore, false);
     chBSemObjectInit(&_io_semaphore, false);
 
-#ifndef HAL_NO_MONITOR_THREAD
+#if HAL_MONITOR_THREAD_ENABLED
     // setup the monitor thread - this is used to detect software lockups
     _monitor_thread_ctx = chThdCreateStatic(_monitor_thread_wa,
                      sizeof(_monitor_thread_wa),
@@ -115,7 +130,7 @@ void Scheduler::init()
                      this);                     /* Thread parameter.    */
 #endif
 
-#ifndef HAL_NO_RCIN_THREAD
+#if HAL_RCIN_THREAD_ENABLED
     // setup the RCIN thread - this will call tasks at 1kHz
     _rcin_thread_ctx = chThdCreateStatic(_rcin_thread_wa,
                      sizeof(_rcin_thread_wa),
@@ -217,7 +232,10 @@ void Scheduler::delay(uint16_t ms)
         delay_microseconds(1000);
         if (_min_delay_cb_ms <= ms) {
             if (in_main_thread()) {
+                const auto old_task = hal.util->persistent_data.scheduler_task;
+                hal.util->persistent_data.scheduler_task = -4;
                 call_delay_cb();
+                hal.util->persistent_data.scheduler_task = old_task;
             }
         }
     }
@@ -372,10 +390,12 @@ void Scheduler::_rcout_thread(void *arg)
 */
 bool Scheduler::in_expected_delay(void) const
 {
+#if AP_HAL_CHIBIOS_IN_EXPECTED_DELAY_WHEN_NOT_INITIALISED
     if (!_initialized) {
         // until setup() is complete we expect delays
         return true;
     }
+#endif
     if (expect_delay_start != 0) {
         uint32_t now = AP_HAL::millis();
         if (now - expect_delay_start <= expect_delay_length) {
@@ -390,7 +410,7 @@ bool Scheduler::in_expected_delay(void) const
     return false;
 }
 
-#ifndef HAL_NO_MONITOR_THREAD
+#if HAL_MONITOR_THREAD_ENABLED
 void Scheduler::_monitor_thread(void *arg)
 {
     Scheduler *sched = (Scheduler *)arg;
@@ -496,7 +516,7 @@ void Scheduler::_monitor_thread(void *arg)
 #endif
     }
 }
-#endif // HAL_NO_MONITOR_THREAD
+#endif  // HAL_MONITOR_THREAD_ENABLED
 
 void Scheduler::_rcin_thread(void *arg)
 {
@@ -545,13 +565,16 @@ void Scheduler::_io_thread(void* arg)
 #if CH_DBG_ENABLE_STACK_CHECK == TRUE
     uint32_t last_stack_check_ms = 0;
 #endif
+#if AP_CRASHDUMP_FATFS_ENABLED
+    uint32_t last_crashdump_check_ms = 0;
+#endif
     while (true) {
         sched->delay_microseconds(1000);
 
         // run registered IO processes
         sched->_run_io();
 
-#if HAL_LOGGING_ENABLED || CH_DBG_ENABLE_STACK_CHECK == TRUE
+#if HAL_LOGGING_ENABLED || CH_DBG_ENABLE_STACK_CHECK == TRUE || AP_CRASHDUMP_FATFS_ENABLED
         uint32_t now = AP_HAL::millis();
 #endif
 
@@ -571,10 +594,16 @@ void Scheduler::_io_thread(void* arg)
             sched->check_stack_free();
         }
 #endif
+#if AP_CRASHDUMP_FATFS_ENABLED
+        if (now - last_crashdump_check_ms > 1000) {
+            last_crashdump_check_ms = now;
+            crashdump_sd_update();
+        }
+#endif
     }
 }
 
-#if defined(STM32H7)
+#if MEMCHECK_ENABLED
 /*
   the H7 has 64k of ITCM memory at address zero. We reserve 1k of it
   to prevent nullptr being valid. This function checks that memory is
@@ -582,28 +611,18 @@ void Scheduler::_io_thread(void* arg)
  */
 void Scheduler::check_low_memory_is_zero()
 {
-    const uint32_t *lowmem = nullptr;
-    // we start at address 0x1 as reading address zero causes a fault
-    for (uint16_t i=1; i<256; i++) {
-        if (lowmem[i] != 0) {
+    for (int addr=0; addr<1024; addr+=4) {
+        uint32_t val;
+        // read using assembly so we don't invoke UB dereferencing nullptr
+        __asm__("\tldr %0, [%1]\n\t" : "=r"(val) : "r"(addr));
+        if (val != 0) {
             // re-use memory guard internal error
             AP_memory_guard_error(1023);
             break;
         }
     }
-    // we can't do address 0, but can check next 3 bytes
-    const uint8_t *addr0 = (const uint8_t *)0;
-    for (uint8_t i=1; i<4; i++) {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-        if (addr0[i] != 0) {
-            AP_memory_guard_error(1023);
-            break;
-        }
-#pragma GCC diagnostic pop
-    }
 }
-#endif // STM32H7
+#endif // MEMCHECK_ENABLED
 
 void Scheduler::_storage_thread(void* arg)
 {
@@ -612,21 +631,21 @@ void Scheduler::_storage_thread(void* arg)
     while (!sched->_hal_initialized) {
         sched->delay_microseconds(10000);
     }
-#if defined STM32H7
+#if MEMCHECK_ENABLED
     uint16_t memcheck_counter=0;
-#endif
+#endif  // MEMCHECK_ENABLED
     while (true) {
         sched->delay_microseconds(1000);
 
         // process any pending storage writes
         hal.storage->_timer_tick();
 
-#if defined STM32H7
+#if MEMCHECK_ENABLED
         if (memcheck_counter++ % 500 == 0) {
             // run check at 2Hz
             sched->check_low_memory_is_zero();
         }
-#endif
+#endif  // MEMCHECK_ENABLED
     }
 }
 
@@ -688,6 +707,7 @@ uint8_t Scheduler::calculate_thread_priority(priority_base base, int8_t priority
         { PRIORITY_UART, APM_UART_PRIORITY},
         { PRIORITY_STORAGE, APM_STORAGE_PRIORITY},
         { PRIORITY_SCRIPTING, APM_SCRIPTING_PRIORITY},
+        { PRIORITY_NET, APM_NET_PRIORITY},
     };
     for (uint8_t i=0; i<ARRAY_SIZE(priority_map); i++) {
         if (priority_map[i].base == base) {
@@ -730,7 +750,7 @@ bool Scheduler::thread_create(AP_HAL::MemberProc proc, const char *name, uint32_
   be used to prevent watchdog reset during expected long delays
   A value of zero cancels the previous expected delay
 */
-void Scheduler::_expect_delay_ms(uint32_t ms)
+void Scheduler::expect_delay_ms(uint32_t ms)
 {
     if (!in_main_thread()) {
         // only for main thread
@@ -739,8 +759,6 @@ void Scheduler::_expect_delay_ms(uint32_t ms)
 
     // pat once immediately
     watchdog_pat();
-
-    WITH_SEMAPHORE(expect_delay_sem);
 
     if (ms == 0) {
         if (expect_delay_nesting > 0) {
@@ -765,18 +783,6 @@ void Scheduler::_expect_delay_ms(uint32_t ms)
         // also put our priority below timer thread if we are boosted
         boost_end();
     }
-}
-
-/*
-  this is _expect_delay_ms() with check that we are in the main thread
- */
-void Scheduler::expect_delay_ms(uint32_t ms)
-{
-    if (!in_main_thread()) {
-        // only for main thread
-        return;
-    }
-    _expect_delay_ms(ms);
 }
 
 // pat the watchdog
@@ -820,14 +826,18 @@ void Scheduler::check_stack_free(void)
 
     if (stack_free(&__main_stack_base__) < min_stack) {
         // use "line number" of 0xFFFF for ISR stack low
+#if AP_INTERNALERROR_ENABLED
         AP::internalerror().error(AP_InternalError::error_t::stack_overflow, 0xFFFF);
+#endif
     }
 
     for (thread_t *tp = chRegFirstThread(); tp; tp = chRegNextThread(tp)) {
         if (stack_free(tp->wabase) < min_stack) {
             // use task priority for line number. This allows us to
             // identify the task fairly reliably
+#if AP_INTERNALERROR_ENABLED
             AP::internalerror().error(AP_InternalError::error_t::stack_overflow, tp->realprio);
+#endif
         }
     }
 }

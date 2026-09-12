@@ -53,6 +53,7 @@
 #define STM32H755_MCUCONF
 #define STM32H747_MCUCONF
 #define STM32H757_MCUCONF
+#define STM32H723_MCUCONF
 
 /*
  * General settings.
@@ -65,11 +66,10 @@
 /*
  * Memory attributes settings.
  */
-//  Disable ChibiOS memory protection which is fixed to SRAM1-3
-#define STM32_NOCACHE_ENABLE                FALSE
-//#define STM32_NOCACHE_MPU_REGION            MPU_REGION_6
-//#define STM32_NOCACHE_RBAR                  0x24000000U
-//#define STM32_NOCACHE_RASR                  MPU_RASR_SIZE_16K
+// #define STM32_NOCACHE_ENABLE                TRUE
+#define STM32_NOCACHE_MPU_REGION_ETH            MPU_REGION_6
+// #define STM32_NOCACHE_RBAR                  0x30040000U
+// #define STM32_NOCACHE_RASR                  MPU_RASR_SIZE_32K
 
 // enable memory protection on SRAM4, used for bdshot
 #define STM32_NOCACHE_MPU_REGION_1          MPU_REGION_5
@@ -86,6 +86,8 @@
 #define STM32_PWR_CR2                       (PWR_CR2_BREN)
 #ifdef SMPS_PWR
 #define STM32_PWR_CR3                       (PWR_CR3_SMPSEN | PWR_CR3_USB33DEN)
+#elif defined(SMPS_EXT)
+#define STM32_PWR_CR3                       (PWR_CR3_BYPASS | PWR_CR3_USB33DEN)
 #else
 #define STM32_PWR_CR3                       (PWR_CR3_LDOEN | PWR_CR3_USB33DEN)
 #endif
@@ -102,7 +104,7 @@
 #define STM32_HSIDIV                        STM32_HSIDIV_DIV1
 
 /*
- * Clock setup for all other H7 variants including H743, H753, H750 and H757
+ * Clock setup for all other H7 variants including H743, H723, H753, H750 and H757
  */
 #define STM32_VOS                           STM32_VOS_SCALE1
 /*
@@ -127,6 +129,14 @@
 #define STM32_PLL2_DIVM_VALUE               1
 #define STM32_PLL3_DIVM_VALUE               2
 
+#elif STM32_HSECLK == 12000000U
+// this gives 400MHz system clock
+#define STM32_HSE_ENABLED                   TRUE
+#define STM32_HSI_ENABLED                   FALSE
+#define STM32_PLL1_DIVM_VALUE               3
+#define STM32_PLL2_DIVM_VALUE               1
+#define STM32_PLL3_DIVM_VALUE               3
+
 #elif STM32_HSECLK == 16000000U
 // this gives 400MHz system clock
 #define STM32_HSE_ENABLED                   TRUE
@@ -150,6 +160,15 @@
 #define STM32_PLL1_DIVM_VALUE               2
 #define STM32_PLL2_DIVM_VALUE               5
 #define STM32_PLL3_DIVM_VALUE               5
+
+#elif STM32_HSECLK == 32000000U
+// this gives 400MHz system clock
+#define STM32_HSE_ENABLED                   TRUE
+#define STM32_HSI_ENABLED                   FALSE
+#define STM32_PLL1_DIVM_VALUE               4
+#define STM32_PLL2_DIVM_VALUE               4
+#define STM32_PLL3_DIVM_VALUE               8
+
 #else
 #error "Unsupported HSE clock"
 #endif
@@ -170,7 +189,7 @@
 #define STM32_PLL3_DIVQ_VALUE               5
 #define STM32_PLL3_DIVR_VALUE               8
 
-#elif (STM32_HSECLK == 8000000U) || (STM32_HSECLK == 16000000U)
+#elif (STM32_HSECLK == 8000000U) || (STM32_HSECLK == 16000000U) || (STM32_HSECLK == 32000000U)
 // common clock tree for multiples of 8MHz crystals
 #ifdef HAL_CUSTOM_MCU_CLOCKRATE
 #if HAL_CUSTOM_MCU_CLOCKRATE == 480000000
@@ -195,11 +214,41 @@
 #define STM32_PLL3_DIVQ_VALUE               6
 #define STM32_PLL3_DIVR_VALUE               9
 
+#elif STM32_HSECLK == 12000000U
+#ifdef HAL_CUSTOM_MCU_CLOCKRATE
+#if HAL_CUSTOM_MCU_CLOCKRATE == 480000000
+#define STM32_PLL1_DIVN_VALUE               240
+#define STM32_PLL1_DIVQ_VALUE               12
+#elif HAL_CUSTOM_MCU_CLOCKRATE == 200000000
+#define STM32_PLL1_DIVN_VALUE               100
+#define STM32_PLL1_DIVQ_VALUE               5
+#else
+#error "Unable to configure custom clockrate"
+#endif
+#else
+#define STM32_PLL1_DIVN_VALUE               200
+#define STM32_PLL1_DIVQ_VALUE               10
+#endif
+#define STM32_PLL1_DIVP_VALUE               2
+#define STM32_PLL1_DIVR_VALUE               2
+
+#define STM32_PLL2_DIVN_VALUE               50
+#define STM32_PLL2_DIVP_VALUE               3
+#define STM32_PLL2_DIVQ_VALUE               6
+#define STM32_PLL2_DIVR_VALUE               3
+
+#define STM32_PLL3_DIVN_VALUE               72
+#define STM32_PLL3_DIVQ_VALUE               6
+#define STM32_PLL3_DIVR_VALUE               9
+
 #elif STM32_HSECLK == 24000000U
 #ifdef HAL_CUSTOM_MCU_CLOCKRATE
 #if HAL_CUSTOM_MCU_CLOCKRATE == 480000000
 #define STM32_PLL1_DIVN_VALUE               120
 #define STM32_PLL1_DIVQ_VALUE               12
+#elif HAL_CUSTOM_MCU_CLOCKRATE == 200000000
+#define STM32_PLL1_DIVN_VALUE               50
+#define STM32_PLL1_DIVQ_VALUE               5
 #else
 #error "Unable to configure custom clockrate"
 #endif
@@ -286,9 +335,15 @@
 #ifndef STM32_MCO1SEL
 #define STM32_MCO1SEL                       STM32_MCO1SEL_HSE_CK
 #endif
+#ifndef STM32_MCO1PRE_VALUE
 #define STM32_MCO1PRE_VALUE                 4
+#endif
+#ifndef STM32_MCO2SEL
 #define STM32_MCO2SEL                       STM32_MCO2SEL_SYS_CK
+#endif
+#ifndef STM32_MCO2PRE_VALUE
 #define STM32_MCO2PRE_VALUE                 4
+#endif
 #define STM32_TIMPRE_ENABLE                 TRUE
 #define STM32_HRTIMSEL                      0
 #define STM32_STOPKERWUCK                   0
@@ -301,7 +356,9 @@
 #ifndef STM32_QSPISEL
 #define STM32_QSPISEL                       STM32_QSPISEL_PLL2_R_CK
 #endif
+#ifdef STM32_QSPISEL_HCLK
 #define STM32_FMCSEL                        STM32_QSPISEL_HCLK
+#endif
 
 #define STM32_SWPSEL                        STM32_SWPSEL_PCLK1
 #define STM32_FDCANSEL                      STM32_FDCANSEL_PLL1_Q_CK
@@ -352,6 +409,9 @@
 #define STM32_IRQ_QUADSPI1_PRIORITY         10
 #define STM32_IRQ_QUADSPI2_PRIORITY         10
 
+#define STM32_IRQ_OCTOSPI1_PRIORITY         10
+#define STM32_IRQ_OCTOSPI2_PRIORITY         10
+
 #define STM32_IRQ_SDMMC1_PRIORITY           9
 #define STM32_IRQ_SDMMC2_PRIORITY           9
 
@@ -397,6 +457,9 @@
 #ifndef STM32_ADC_USE_ADC3
 #define STM32_ADC_USE_ADC3                  TRUE
 #endif
+#endif
+#if !defined(STM32_ADC_ADC3_USE_BDMA)
+#define STM32_ADC_ADC3_USE_BDMA             TRUE
 #endif
 #define STM32_ADC_ADC12_DMA_PRIORITY        2
 #define STM32_ADC_ADC3_DMA_PRIORITY         2
@@ -628,10 +691,9 @@
 // limit ISR count per byte
 #define STM32_I2C_ISR_LIMIT                 6
 
-// limit SDMMC clock to 12.5MHz by default. This increases
-// reliability
+// limit SDMMC clock to 50MHz by default
 #ifndef STM32_SDC_MAX_CLOCK
-#define STM32_SDC_MAX_CLOCK                 12500000
+#define STM32_SDC_MAX_CLOCK                 50000000
 #endif
 
 #ifndef STM32_WSPI_USE_QUADSPI1

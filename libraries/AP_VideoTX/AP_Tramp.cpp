@@ -77,12 +77,17 @@ void AP_Tramp::send_command(uint8_t cmd, uint16_t param)
     port->write(request_buffer, TRAMP_BUF_SIZE);
     port->flush();
 
+    _packets_sent++;
+
     debug("send command '%c': %u", cmd, param);
 }
 
 // Process response and return code if valid else 0
 char AP_Tramp::handle_response(void)
 {
+    _packets_rcvd++;
+    _packets_sent = _packets_rcvd;
+
     const uint8_t respCode = response_buffer[1];
 
     switch (respCode) {
@@ -123,6 +128,21 @@ char AP_Tramp::handle_response(void)
             }
 
             vtx.set_power_mw(power);
+            vtx.set_actual_power_mw(cur_act_power);
+
+            // VTX-reported rf_power_max is unreliable, so warn on the user cap instead
+            if (!_act_power_warned && cur_act_power != 0) {
+                const uint16_t user_cap = vtx.get_max_power_mw();
+                const bool over_cap = (user_cap != 0 && cur_act_power > user_cap);
+                const bool over_request = (power != 0 && cur_act_power > power + (power / 2));
+                if (over_cap || over_request) {
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                                  "VTX: requested %umW, actual %umW, cap %umW",
+                                  unsigned(power), unsigned(cur_act_power), unsigned(user_cap));
+                    _act_power_warned = true;
+                }
+            }
+
             if (pit_mode) {
                 vtx.set_options(vtx.get_options() | uint8_t(AP_VideoTX::VideoOptions::VTX_PITMODE));
             } else {
@@ -135,9 +155,12 @@ char AP_Tramp::handle_response(void)
                 vtx.announce_vtx_settings();
             }
 
-            debug("device config: freq: %u, power: %u, pitmode: %u",
-                unsigned(freq), unsigned(power), unsigned(pit_mode));
+            debug("device config: freq: %u, cfg pwr: %umw, act pwr: %umw, pitmode: %u, ctrl: 0x%02x",
+                unsigned(freq), unsigned(power), unsigned(cur_act_power),
+                unsigned(pit_mode), unsigned(cur_control_mode));
 
+            // update the "_configuration_finished" flag, otherwise OSD item VTX_POWER blinks forever
+            vtx.set_configuration_finished(!update_pending);
 
             return 'v';
         }
@@ -162,6 +185,7 @@ char AP_Tramp::handle_response(void)
 // Reset receiver state machine
 void AP_Tramp::reset_receiver(void)
 {
+    port->discard_input();
     receive_state = ReceiveState::S_WAIT_LEN;
     receive_pos = 0;
 }
@@ -316,6 +340,9 @@ void AP_Tramp::process_requests()
             // Device replied to freq / power / pit query, enter online
             set_status(TrampStatus::TRAMP_STATUS_ONLINE_MONITOR_FREQPWRPIT);
         } else if ((now - last_time_us) >= TRAMP_MIN_REQUEST_PERIOD_US) {
+
+            update_baud_rate();
+
             // Min request period exceeded, issue another query
             send_query('v');
 
@@ -332,12 +359,14 @@ void AP_Tramp::process_requests()
             AP_VideoTX& vtx = AP::vtx();
             // Config retries remain and min request period exceeded, check freq
             if (!is_race_lock_enabled() && vtx.update_frequency()) {
+                debug("Updating frequency to %uMhz", vtx.get_configured_frequency_mhz());
                 // Freq can be and needs to be updated, issue request
                 send_command('F', vtx.get_configured_frequency_mhz());
 
                 // Set flag
                 configUpdateRequired = true;
             } else if (!is_race_lock_enabled() && vtx.update_power()) {
+                debug("Updating power to %umw\n", vtx.get_configured_power_mw());
                 // Power can be and needs to be updated, issue request
                 send_command('P', vtx.get_configured_power_mw());
 
@@ -457,25 +486,72 @@ void AP_Tramp::update()
     AP_VideoTX& vtx = AP::vtx();
 
     if (vtx.have_params_changed() && retry_count == 0) {
-        // check changes in the order they will be processed
+        // check changes in the order they will be processed; re-arm retries
+        // only on real changes so a VTX rejecting a value can't loop forever
         if (vtx.update_frequency() || vtx.update_band() || vtx.update_channel()) {
             if (vtx.update_frequency()) {
                 vtx.update_configured_channel_and_band();
             } else {
                 vtx.update_configured_frequency();
             }
-            set_frequency(vtx.get_configured_frequency_mhz());
+            const uint16_t conf_freq = vtx.get_configured_frequency_mhz();
+            if (conf_freq != _last_conf_freq) {
+                _last_conf_freq = conf_freq;
+                set_frequency(conf_freq);
+            }
         }
         else if (vtx.update_power()) {
-            retry_count = VTX_TRAMP_MAX_RETRIES;
+            const uint16_t conf_power = vtx.get_configured_power_mw();
+            if (conf_power != _last_conf_power) {
+                _last_conf_power = conf_power;
+                retry_count = VTX_TRAMP_MAX_RETRIES;
+                _power_warn_pending = true;
+            } else if (_power_warn_pending) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING,
+                              "VTX: rejected power %umW", unsigned(conf_power));
+                _power_warn_pending = false;
+            }
         }
         else if (vtx.update_options()) {
-            retry_count = VTX_TRAMP_MAX_RETRIES;
+            const uint16_t conf_options = vtx.get_configured_options();
+            if (conf_options != _last_conf_options) {
+                _last_conf_options = conf_options;
+                retry_count = VTX_TRAMP_MAX_RETRIES;
+            }
         }
     }
 
     process_requests();
 }
+
+// we missed a response too many times - update the baud rate in case the temperature has increased
+void AP_Tramp::update_baud_rate()
+{
+    // on my Unify Pro32 the VTX will respond immediately on power up to a settings request, so 5 packets is easily more than enough
+    // we want to bias autobaud to only frequency hop when the current frequency is clearly exhausted, but after that hop quickly
+    // on a Foxeer Reaper Infinity the actual response baudrate is more like 9400, so auto-bauding down in the first instance.
+    if (_packets_sent - _packets_rcvd < 5) {
+        return;
+    }
+
+    if (_smartbaud_direction == AutobaudDirection::UP
+        && _smartbaud == VTX_TRAMP_SMARTBAUD_MAX) {
+        _smartbaud_direction = AutobaudDirection::DOWN;
+    } else if (_smartbaud_direction == AutobaudDirection::DOWN
+        && _smartbaud == VTX_TRAMP_SMARTBAUD_MIN) {
+        _smartbaud_direction = AutobaudDirection::UP;
+    }
+
+    _smartbaud += VTX_TRAMP_SMARTBAUD_STEP * int32_t(_smartbaud_direction);
+
+    debug("autobaud: %d", int(_smartbaud));
+
+    port->discard_input();
+    port->begin(_smartbaud);
+
+    _packets_sent = _packets_rcvd = 0;
+}
+
 
 bool AP_Tramp::init(void)
 {
@@ -495,9 +571,11 @@ bool AP_Tramp::init(void)
         port->begin(AP_TRAMP_UART_BAUD, AP_TRAMP_UART_BUFSIZE_RX, AP_TRAMP_UART_BUFSIZE_TX);
         debug("port opened");
 
+        AP::vtx().set_provider_enabled(AP_VideoTX::VTXType::Tramp);
+
         return true;
     }
     return false;
 }
 
-#endif // VTX_TRAMP
+#endif // AP_TRAMP_ENABLED

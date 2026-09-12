@@ -43,7 +43,7 @@ void Blimp::failsafe_check()
         failsafe_last_timestamp = tnow;
         if (in_failsafe) {
             in_failsafe = false;
-            AP::logger().Write_Error(LogErrorSubsystem::CPU, LogErrorCode::FAILSAFE_RESOLVED);
+            LOGGER_WRITE_ERROR(LogErrorSubsystem::CPU, LogErrorCode::FAILSAFE_RESOLVED);
         }
         return;
     }
@@ -51,7 +51,7 @@ void Blimp::failsafe_check()
     if (!in_failsafe && failsafe_enabled && tnow - failsafe_last_timestamp > 2000000) {
         // motors are running but we have gone 2 second since the
         // main loop ran. That means we're in trouble and should
-        // disarm the motors->
+        // disarm the motors.
         in_failsafe = true;
         // reduce motors to minimum (we do not immediately disarm because we want to log the failure)
         if (motors->armed()) {
@@ -59,7 +59,7 @@ void Blimp::failsafe_check()
             //TODO: this may not work correctly.
         }
 
-        AP::logger().Write_Error(LogErrorSubsystem::CPU, LogErrorCode::FAILSAFE_OCCURRED);
+        LOGGER_WRITE_ERROR(LogErrorSubsystem::CPU, LogErrorCode::FAILSAFE_OCCURRED);
     }
 
     if (failsafe_enabled && in_failsafe && tnow - failsafe_last_timestamp > 1000000) {

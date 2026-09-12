@@ -27,9 +27,14 @@
 #include <AP_Rally/AP_Rally.h>
 #include <GCS_MAVLink/MissionItemProtocol_Rally.h>
 #include <GCS_MAVLink/MissionItemProtocol_Fence.h>
+#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
+
+// QURT HAL already has a declaration of errno in errno.h
+#if CONFIG_HAL_BOARD != HAL_BOARD_QURT
 extern int errno;
+#endif
 
 #define IDLE_TIMEOUT_MS 30000
 
@@ -69,7 +74,7 @@ int AP_Filesystem_Mission::open(const char *fname, int flags, bool allow_absolut
     r.num_items = get_num_items(r.mtype);
     if (!readonly) {
         // setup for upload
-        r.writebuf = new ExpandingString();
+        r.writebuf = NEW_NOTHROW ExpandingString();
     } else {
         r.writebuf = nullptr;
     }
@@ -201,8 +206,7 @@ int AP_Filesystem_Mission::stat(const char *name, struct stat *stbuf)
         return -1;
     }
     memset(stbuf, 0, sizeof(*stbuf));
-    // give fixed size to avoid needing to scan entire file
-    stbuf->st_size = 1024*1024;
+    stbuf->st_size = sizeof(struct header) + get_num_items(mtype) * MAVLINK_MSG_ID_MISSION_ITEM_INT_LEN;
     return 0;
 }
 
@@ -211,10 +215,12 @@ int AP_Filesystem_Mission::stat(const char *name, struct stat *stbuf)
  */
 bool AP_Filesystem_Mission::check_file_name(const char *name, enum MAV_MISSION_TYPE &mtype)
 {
+#if AP_MISSION_ENABLED
     if (strcmp(name, "mission.dat") == 0) {
         mtype = MAV_MISSION_TYPE_MISSION;
         return true;
     }
+#endif
 #if AP_FENCE_ENABLED
     if (strcmp(name, "fence.dat") == 0) {
         mtype = MAV_MISSION_TYPE_FENCE;
@@ -237,11 +243,7 @@ bool AP_Filesystem_Mission::get_item(uint32_t idx, enum MAV_MISSION_TYPE mtype, 
 {
     switch (mtype) {
     case MAV_MISSION_TYPE_MISSION: {
-        auto *mission = AP::mission();
-        if (!mission) {
-            return false;
-        }
-        return mission->get_item(idx, item);
+        return AP::mission().get_item(idx, item);
     }
 #if AP_FENCE_ENABLED
     case MAV_MISSION_TYPE_FENCE:
@@ -261,25 +263,21 @@ bool AP_Filesystem_Mission::get_item(uint32_t idx, enum MAV_MISSION_TYPE mtype, 
 uint32_t AP_Filesystem_Mission::get_num_items(enum MAV_MISSION_TYPE mtype) const
 {
     switch (mtype) {
+#if AP_MISSION_ENABLED
     case MAV_MISSION_TYPE_MISSION: {
-        auto *mission = AP::mission();
-        if (!mission) {
-            return 0;
-        }
-        return mission->num_commands();
+        return AP::mission().num_commands();
     }
-        
-    case MAV_MISSION_TYPE_FENCE: {
+#endif
+
 #if AP_FENCE_ENABLED
+    case MAV_MISSION_TYPE_FENCE: {
         auto *fence = AP::fence();
         if (fence == nullptr) {
             return 0;
         }
         return fence->polyfence().num_stored_items();
-#else
-        return 0;
-#endif
     }
+#endif
 
 #if HAL_RALLY_ENABLED
     case MAV_MISSION_TYPE_RALLY: {
@@ -381,38 +379,147 @@ bool AP_Filesystem_Mission::finish_upload(const rfile &r)
         }
     }
 
-    auto *mission = AP::mission();
-    if (mission == nullptr) {
-        return false;
+    switch (r.mtype) {
+#if AP_MISSION_ENABLED
+    case MAV_MISSION_TYPE_MISSION:
+        return finish_upload_mission(hdr, r, b);
+#endif
+#if HAL_RALLY_ENABLED
+    case MAV_MISSION_TYPE_RALLY:
+        return finish_upload_rally(hdr, r, b);
+#endif
+#if AP_FENCE_ENABLED
+    case MAV_MISSION_TYPE_FENCE:
+        return finish_upload_fence(hdr, r, b);
+#endif
+    default:
+        // really should not get here....
+        break;
     }
-    WITH_SEMAPHORE(mission->get_semaphore());
+
+    return false;
+}
+
+#if AP_MISSION_ENABLED
+bool AP_Filesystem_Mission::finish_upload_mission(const struct header &hdr, const rfile &r, const uint8_t *b)
+{
+    auto &mission = AP::mission();
+    WITH_SEMAPHORE(mission.get_semaphore());
     if ((hdr.options & unsigned(Options::NO_CLEAR)) == 0) {
-        mission->clear();
+        mission.clear();
     }
-    for (uint32_t i=0; i<nitems; i++) {
+    for (uint32_t i=0; i<hdr.num_items; i++) {
         mavlink_mission_item_int_t m {};
         AP_Mission::Mission_Command cmd;
+        const uint8_t item_size = MAVLINK_MSG_ID_MISSION_ITEM_INT_LEN;
         memcpy(&m, &b[sizeof(hdr)+i*item_size], item_size);
         const MAV_MISSION_RESULT res = AP_Mission::mavlink_int_to_mission_cmd(m, cmd);
         if (res != MAV_MISSION_ACCEPTED) {
             return false;
         }
         if (cmd.id == MAV_CMD_DO_JUMP &&
-            (cmd.content.jump.target >= nitems || cmd.content.jump.target == 0)) {
+            (cmd.content.jump.target >= hdr.num_items || cmd.content.jump.target == 0)) {
             return false;
         }
         uint16_t idx = i + hdr.start;
-        if (idx == mission->num_commands()) {
-            if (!mission->add_cmd(cmd)) {
+        if (idx == mission.num_commands()) {
+            if (!mission.add_cmd(cmd)) {
                 return false;
             }
         } else {
-            if (!mission->replace_cmd(idx, cmd)) {
+            if (!mission.replace_cmd(idx, cmd)) {
                 return false;
             }
         }
     }
     return true;
 }
+#endif  // AP_MISSION_ENABLED
+
+#if AP_FENCE_ENABLED
+bool AP_Filesystem_Mission::finish_upload_fence(const struct header &hdr, const rfile &r, const uint8_t *b)
+{
+    bool success = false;
+
+    AC_PolyFenceItem *new_items = nullptr;
+
+    auto *fence = AP::fence();
+    if (fence == nullptr) {
+        goto OUT;
+    }
+
+    if ((hdr.options & unsigned(Options::NO_CLEAR)) != 0) {
+        // Only complete fences can be uploaded for now.
+        goto OUT;
+    }
+
+    // passing nullptr and 0 items through to Polyfence loader is
+    // absolutely OK:
+    if (hdr.num_items != 0) {
+        new_items = NEW_NOTHROW AC_PolyFenceItem[hdr.num_items];
+        if (new_items == nullptr) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Out of memory for upload");
+            goto OUT;
+        }
+    }
+
+    // convert from MISSION_ITEM_INT to AC_PolyFenceItem:
+    for (uint32_t i=0; i<hdr.num_items; i++) {
+        mavlink_mission_item_int_t m {};
+        const uint8_t item_size = MAVLINK_MSG_ID_MISSION_ITEM_INT_LEN;
+        memcpy(&m, &b[sizeof(hdr)+i*item_size], item_size);
+        const MAV_MISSION_RESULT res = MissionItemProtocol_Fence::convert_MISSION_ITEM_INT_to_AC_PolyFenceItem(m, new_items[i]);
+        if (res != MAV_MISSION_ACCEPTED) {
+            goto OUT;
+        }
+    }
+
+    success = fence->polyfence().write_fence(new_items, hdr.num_items);
+
+OUT:
+
+    delete[] new_items;
+
+    return success;
+}
+#endif  // AP_FENCE_ENABLED
+
+#if HAL_RALLY_ENABLED
+bool AP_Filesystem_Mission::finish_upload_rally(const struct header &hdr, const rfile &r, const uint8_t *b)
+{
+    bool success = false;
+
+    auto *rally = AP::rally();
+    if (rally == nullptr) {
+        goto OUT;
+    }
+
+    if ((hdr.options & unsigned(Options::NO_CLEAR)) != 0) {
+        //only complete sets of rally points can be added ATM
+        goto OUT;
+    }
+
+    rally->truncate(0);
+
+    for (uint32_t i=0; i<hdr.num_items; i++) {
+        mavlink_mission_item_int_t m {};
+        RallyLocation cmd;
+        const uint8_t item_size = MAVLINK_MSG_ID_MISSION_ITEM_INT_LEN;
+        memcpy(&m, &b[sizeof(hdr)+i*item_size], item_size);
+        const MAV_MISSION_RESULT res = MissionItemProtocol_Rally::convert_MISSION_ITEM_INT_to_RallyLocation(m, cmd);
+        if (res != MAV_MISSION_ACCEPTED) {
+            goto OUT;
+        }
+
+        if (!rally->append(cmd)) {
+            goto OUT;
+        }
+    }
+    success = true;
+
+OUT:
+    return success;
+}
+#endif  // HAL_RALLY_ENABLED
 
 #endif  // AP_FILESYSTEM_MISSION_ENABLED

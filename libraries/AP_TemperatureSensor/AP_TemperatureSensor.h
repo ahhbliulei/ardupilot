@@ -20,11 +20,25 @@
 
 #include "AP_TemperatureSensor_Params.h"
 
+// maximum number of Temperature Sensors
+#ifndef AP_TEMPERATURE_SENSOR_MAX_INSTANCES
+#define AP_TEMPERATURE_SENSOR_MAX_INSTANCES             3
+#endif
+
+// first sensor is always the primary sensor
+#ifndef AP_TEMPERATURE_SENSOR_PRIMARY_INSTANCE
+#define AP_TEMPERATURE_SENSOR_PRIMARY_INSTANCE          0
+#endif
+
 // declare backend class
 class AP_TemperatureSensor_Backend;
 class AP_TemperatureSensor_TSYS01;
 class AP_TemperatureSensor_MCP9600;
 class AP_TemperatureSensor_MAX31865;
+class AP_TemperatureSensor_TSYS03;
+class AP_TemperatureSensor_Analog;
+class AP_TemperatureSensor_MLX90614;
+class AP_TemperatureSensor_TMP119;
 
 class AP_TemperatureSensor
 {
@@ -32,6 +46,11 @@ class AP_TemperatureSensor
     friend class AP_TemperatureSensor_TSYS01;
     friend class AP_TemperatureSensor_MCP9600;
     friend class AP_TemperatureSensor_MAX31865;
+    friend class AP_TemperatureSensor_TSYS03;
+    friend class AP_TemperatureSensor_Analog;
+    friend class AP_TemperatureSensor_DroneCAN;
+    friend class AP_TemperatureSensor_MLX90614;
+    friend class AP_TemperatureSensor_TMP119;
 
 public:
 
@@ -46,11 +65,12 @@ public:
     uint8_t num_instances(void) const { return _num_instances; }
 
     // detect and initialise any available temperature sensors
-    void init();
+    __INITFUNC__ void init();
 
     // Update the temperature for all temperature sensors
     void update();
 
+    // return temperature from sensor - in degrees Celsius
     bool get_temperature(float &temp, const uint8_t instance = AP_TEMPERATURE_SENSOR_PRIMARY_INSTANCE) const;
 
     bool healthy(const uint8_t instance = AP_TEMPERATURE_SENSOR_PRIMARY_INSTANCE) const;
@@ -61,6 +81,7 @@ public:
     int32_t get_source_id(const uint8_t instance = AP_TEMPERATURE_SENSOR_PRIMARY_INSTANCE) const;
 
     static const struct AP_Param::GroupInfo var_info[];
+    static const struct AP_Param::GroupInfo *backend_var_info[AP_TEMPERATURE_SENSOR_MAX_INSTANCES];
 
 protected:
     // parameters
@@ -74,6 +95,7 @@ private:
         uint32_t    last_time_ms;              // time when the sensor was last read in milliseconds
         float       temperature;               // temperature (deg C)
         uint8_t     instance;                  // instance number
+        const struct AP_Param::GroupInfo *var_info; 
     };
 
     TemperatureSensor_State _state[AP_TEMPERATURE_SENSOR_MAX_INSTANCES];
@@ -81,8 +103,14 @@ private:
 
     uint8_t     _num_instances;         // number of temperature sensors
 
-    // Parameters
-    AP_Int8 _log_flag;                  // log_flag: true if we should log all sensors data
+#if HAL_LOGGING_ENABLED
+    enum class LoggingType : uint8_t {
+        All = 1,
+        SourceNone = 2,
+    };
+    AP_Enum<LoggingType> _logging_type;
+#endif
+
 };
 
 namespace AP {

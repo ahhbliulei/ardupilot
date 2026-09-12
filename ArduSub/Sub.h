@@ -51,7 +51,6 @@
 #include <AP_Relay/AP_Relay.h>           // APM relay
 #include <AP_Mount/AP_Mount.h>           // Camera/Antenna mount
 #include <AP_Vehicle/AP_Vehicle.h>         // needed for AHRS build
-#include <AP_InertialNav/AP_InertialNav.h>     // inertial navigation library
 #include <AC_WPNav/AC_WPNav.h>           // Waypoint navigation library
 #include <AC_WPNav/AC_Loiter.h>
 #include <AC_WPNav/AC_Circle.h>          // circle navigation library
@@ -62,21 +61,25 @@
 #include <AP_JSButton/AP_JSButton.h>   // Joystick/gamepad button function assignment
 #include <AP_LeakDetector/AP_LeakDetector.h> // Leak detector
 #include <AP_Proximity/AP_Proximity.h>
+#include <AP_Rally/AP_Rally.h>
+#include <AP_OSD/AP_OSD.h>
 
 // Local modules
 #include "defines.h"
 #include "config.h"
-#include "GCS_Mavlink.h"
-#include "RC_Channel.h"         // RC Channel Library
+#include "GCS_MAVLink_Sub.h"
+#include "RC_Channel_Sub.h"         // RC Channel Library
 #include "Parameters.h"
 #include "AP_Arming_Sub.h"
 #include "GCS_Sub.h"
 #include "mode.h"
+#include "script_button.h"
+
 
 #include <AP_OpticalFlow/AP_OpticalFlow.h>     // Optical Flow library
 
 // libraries which are dependent on #defines in defines.h and/or config.h
-#if RCMAP_ENABLED == ENABLED
+#if RCMAP_ENABLED
 #include <AP_RCMapper/AP_RCMapper.h>        // RC input mapping library
 #endif
 
@@ -86,12 +89,7 @@
 #include <AP_RPM/AP_RPM.h>
 #endif
 
-#include <AP_Gripper/AP_Gripper_config.h>
-#if AP_GRIPPER_ENABLED
-#include <AP_Gripper/AP_Gripper.h>             // gripper stuff
-#endif
-
-#if AVOIDANCE_ENABLED == ENABLED
+#if AVOIDANCE_ENABLED
 #include <AC_Avoidance/AC_Avoid.h>           // Stop at fence library
 #endif
 
@@ -109,11 +107,13 @@ public:
     friend class ParametersG2;
     friend class AP_Arming_Sub;
     friend class RC_Channels_Sub;
+    friend class RC_Channel_Sub;
     friend class Mode;
     friend class ModeManual;
     friend class ModeStabilize;
     friend class ModeAcro;
     friend class ModeAlthold;
+    friend class ModeSurftrak;
     friend class ModeGuided;
     friend class ModePoshold;
     friend class ModeAuto;
@@ -129,9 +129,6 @@ protected:
 
 private:
 
-    // key aircraft parameters passed to multiple libraries
-    AP_MultiCopter aparm;
-
     // Global parameters are all contained within the 'g' class.
     Parameters g;
     ParametersG2 g2;
@@ -144,21 +141,19 @@ private:
     RC_Channel *channel_forward;
     RC_Channel *channel_lateral;
 
-    AP_Logger logger;
-
     AP_LeakDetector leak_detector;
 
     struct {
-        bool enabled:1;
-        bool alt_healthy:1; // true if we can trust the altitude from the rangefinder
-        int16_t alt_cm;     // tilt compensated altitude (in cm) from rangefinder
+        bool enabled;
+        bool alt_healthy; // true if we can trust the altitude from the rangefinder
+        float alt;     // tilt compensated altitude from rangefinder
+        float min;     // min rangefinder distance
+        float max;     // max rangefinder distance
         uint32_t last_healthy_ms;
-        LowPassFilterFloat alt_cm_filt; // altitude filter
-    } rangefinder_state = { false, false, 0, 0 };
-
-#if AP_RPM_ENABLED
-    AP_RPM rpm_sensor;
-#endif
+        float inertial_alt_cm;                  // inertial alt at time of last rangefinder sample
+        float rangefinder_terrain_offset_cm;    // terrain height above EKF origin
+        LowPassFilterFloat alt_filt;         // altitude filter
+    } rangefinder_state = { false, false, 0, 0, 0, 0, 0, 0 };
 
     // Mission library
     AP_Mission mission{
@@ -171,8 +166,12 @@ private:
     AP_OpticalFlow optflow;
 #endif
 
-    // system time in milliseconds of last recorded yaw reset from ekf
-    uint32_t ekfYawReset_ms = 0;
+#if OSD_ENABLED || OSD_PARAM_ENABLED
+    AP_OSD osd;
+#endif
+
+    // count number of times the AHRS yaw has been reset:
+    uint16_t ahrs_yaw_reset_count;
 
     // GCS selection
     GCS_Sub _gcs; // avoid using this; use gcs()
@@ -206,7 +205,7 @@ private:
 
     Mode::Number prev_control_mode;
 
-#if RCMAP_ENABLED == ENABLED
+#if RCMAP_ENABLED
     RCMapper rcmap;
 #endif
 
@@ -219,6 +218,10 @@ private:
         uint32_t terrain_last_failure_ms;   // the most recent time terrain data access failed
         uint32_t last_crash_warn_ms; // last time a crash warning was sent to gcs
         uint32_t last_ekf_warn_ms; // last time an ekf warning was sent to gcs
+#if AP_SUB_RC_ENABLED
+        int8_t radio_counter;            // number of iterations with throttle below throttle_fs_value
+        uint8_t radio               : 1; // A status flag for the radio failsafe
+#endif    
 
         uint8_t pilot_input          : 1; // true if pilot input failsafe is active, handles things like joystick being disconnected during operation
         uint8_t gcs                  : 1; // A status flag for the ground station failsafe
@@ -232,7 +235,18 @@ private:
     } failsafe;
 
     bool any_failsafe_triggered() const {
-        return (failsafe.pilot_input || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain);
+        return (
+            failsafe.pilot_input
+            || battery.has_failsafed()
+            || failsafe.gcs
+            || failsafe.ekf
+            || failsafe.terrain
+            || failsafe.leak
+            || failsafe.internal_pressure
+            || failsafe.internal_temperature
+            || failsafe.crash
+            || failsafe.sensor_health
+        );
     }
 
     // sensor health for logging
@@ -252,9 +266,6 @@ private:
     // Stores initial bearing when armed
     int32_t initial_armed_bearing;
 
-    // Throttle variables
-    int16_t desired_climb_rate;          // pilot desired climb rate - for logging purposes only
-
     // Loiter control
     uint16_t loiter_time_max;                // How long we should stay in Loiter Mode for mission scripting (time in seconds)
     uint32_t loiter_time;                    // How long have we been loitering - The start time in millis
@@ -269,11 +280,6 @@ private:
                            _failsafe_priorities};
 
     AP_Arming_Sub arming;
-
-    // Altitude
-    // The cm/s we are moving up or down based on filtered data - Positive = UP
-    int16_t climb_rate;
-    float target_rangefinder_alt;      // desired altitude in cm above the ground
 
     // Turn counter
     int32_t quarter_turn_count;
@@ -295,9 +301,12 @@ private:
     // Navigation Yaw control
     // auto flight mode's yaw mode
     uint8_t auto_yaw_mode;
+    
+    // Parameter to set yaw rate only
+    bool yaw_rate_only;
 
     // Yaw will point at this location if auto_yaw_mode is set to AUTO_YAW_ROI
-    Vector3f roi_WP;
+    Vector3f roi_WP_neu_cm;
 
     // bearing from current location to the yaw_look_at_WP
     float yaw_look_at_WP_bearing;
@@ -316,9 +325,6 @@ private:
     // Delay Mission Scripting Command
     int32_t condition_value;  // used in condition commands (eg delay, change alt, etc.)
     uint32_t condition_start;
-
-    // Inertial Navigation
-    AP_InertialNav inertial_nav;
 
     AP_AHRS_View ahrs_view;
 
@@ -342,7 +348,7 @@ private:
     AP_Mount camera_mount;
 #endif
 
-#if AVOIDANCE_ENABLED == ENABLED
+#if AVOIDANCE_ENABLED
     AC_Avoid avoid;
 #endif
 
@@ -368,7 +374,7 @@ private:
     // setup the var_info table
     AP_Param param_loader;
 
-    uint32_t last_pilot_heading;
+    float last_pilot_heading_rad;
     uint32_t last_pilot_yaw_input_ms;
     uint32_t fs_terrain_recover_start_ms;
 
@@ -381,6 +387,7 @@ private:
     void update_batt_compass(void);
     void ten_hz_logging_loop();
     void twentyfive_hz_logging();
+    void loop_rate_logging();
     void three_hz_loop();
     void one_hz_loop();
     void update_turn_counter();
@@ -393,8 +400,16 @@ private:
     float get_roi_yaw();
     float get_look_ahead_yaw();
     float get_pilot_desired_climb_rate(float throttle_control);
-    float get_surface_tracking_climb_rate(int16_t target_rate, float current_alt_target, float dt);
+    float get_pilot_desired_horizontal_rate(RC_Channel *channel) const;
     void rotate_body_frame_to_NE(float &x, float &y);
+#if HAL_LOGGING_ENABLED
+    // methods for AP_Vehicle:
+    const AP_Int32 &get_log_bitmask() override { return g.log_bitmask; }
+    const struct LogStructure *get_log_structures() const override {
+        return log_structure;
+    }
+    uint8_t get_num_log_structures() const override;
+
     void Log_Write_Control_Tuning();
     void Log_Write_Attitude();
     void Log_Write_Data(LogDataID id, int32_t value);
@@ -402,8 +417,9 @@ private:
     void Log_Write_Data(LogDataID id, int16_t value);
     void Log_Write_Data(LogDataID id, uint16_t value);
     void Log_Write_Data(LogDataID id, float value);
-    void Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target, const Vector3f& vel_target);
+    void Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target_neu_cm, const Vector3f& vel_target_neu_cms, const Vector3f& acc_target_neu_cmss);
     void Log_Write_Vehicle_Startup_Messages();
+#endif
     void load_parameters(void) override;
     void userhook_init();
     void userhook_FastLoop();
@@ -412,11 +428,12 @@ private:
     void userhook_SlowLoop();
     void userhook_SuperSlowLoop();
     void update_home_from_EKF();
-    void set_home_to_current_location_inflight();
-    bool set_home_to_current_location(bool lock) WARN_IF_UNUSED;
-    bool set_home(const Location& loc, bool lock) WARN_IF_UNUSED;
-    bool far_from_EKF_origin(const Location& loc);
+    bool set_home_to_current_location(bool lock) override WARN_IF_UNUSED;
+    bool set_home(const Location& loc, bool lock) override WARN_IF_UNUSED;
+    float get_alt_rel() const WARN_IF_UNUSED;
+    float get_alt_msl() const WARN_IF_UNUSED;
     void exit_mission();
+    void set_origin(const Location& loc);
     bool verify_loiter_unlimited();
     bool verify_loiter_time();
     bool verify_wait_delay();
@@ -435,7 +452,10 @@ private:
     void failsafe_terrain_on_event();
     void mainloop_failsafe_enable();
     void mainloop_failsafe_disable();
+#if AP_FENCE_ENABLED
     void fence_check();
+    void fence_checks_async() override;
+#endif
     bool set_mode(Mode::Number mode, ModeReason reason);
     bool set_mode(const uint8_t new_mode, const ModeReason reason) override;
     uint8_t get_mode() const override { return (uint8_t)control_mode; }
@@ -449,18 +469,36 @@ private:
     void motors_output();
     void init_rc_in();
     void init_rc_out();
+#if AP_SUB_RC_ENABLED
+    void rc_loop(); 
+    void read_radio();  
+        // last valid RC input time
+    uint32_t last_radio_update_ms;
+    void set_failsafe_radio(bool b);
+    void set_throttle_and_failsafe(uint16_t throttle_pwm);
+    void failsafe_radio_off_event();
+    void failsafe_radio_on_event();
+#endif
     void enable_motor_output();
     void init_joystick();
-    void transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t z, int16_t r, uint16_t buttons);
+    void transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t z, int16_t r, uint16_t buttons, uint16_t buttons2, uint8_t enabled_extensions,
+            int16_t s,
+            int16_t t,
+            int16_t aux1,
+            int16_t aux2,
+            int16_t aux3,
+            int16_t aux4,
+            int16_t aux5,
+            int16_t aux6);
     void handle_jsbutton_press(uint8_t button,bool shift=false,bool held=false);
     void handle_jsbutton_release(uint8_t button, bool shift);
     JSButton* get_button(uint8_t index);
     void default_js_buttons(void);
     void clear_input_hold();
+    bool jsbutton_function_is_assigned(JSButton::button_function_t function);
     void read_barometer(void);
     void init_rangefinder(void);
     void read_rangefinder(void);
-    bool rangefinder_alt_ok(void) const;
     void terrain_update();
     void terrain_logging();
     void init_ardupilot() override;
@@ -483,7 +521,7 @@ private:
     void do_loiter_unlimited(const AP_Mission::Mission_Command& cmd);
     void do_circle(const AP_Mission::Mission_Command& cmd);
     void do_loiter_time(const AP_Mission::Mission_Command& cmd);
-#if NAV_GUIDED == ENABLED
+#if NAV_GUIDED
     void do_nav_guided_enable(const AP_Mission::Mission_Command& cmd);
     void do_guided_limits(const AP_Mission::Mission_Command& cmd);
 #endif
@@ -500,12 +538,10 @@ private:
     bool verify_surface(const AP_Mission::Mission_Command& cmd);
     bool verify_RTL(void);
     bool verify_circle(const AP_Mission::Mission_Command& cmd);
-#if NAV_GUIDED == ENABLED
+#if NAV_GUIDED
     bool verify_nav_guided_enable(const AP_Mission::Mission_Command& cmd);
 #endif
     bool verify_nav_delay(const AP_Mission::Mission_Command& cmd);
-
-    void log_init(void);
 
     void failsafe_leak_check();
     void failsafe_internal_pressure_check();
@@ -518,15 +554,21 @@ private:
     void translate_circle_nav_rp(float &lateral_out, float &forward_out);
     void translate_pos_control_rp(float &lateral_out, float &forward_out);
 
-    bool surface_init(void);
-    void surface_run();
-
     void stats_update();
 
     uint16_t get_pilot_speed_dn() const;
 
-    void convert_old_parameters(void);
-    bool handle_do_motor_test(mavlink_command_long_t command);
+
+#if LEAKDETECTOR_MAX_INSTANCES > 0
+    void update_leak_pins();
+#endif
+#if AP_RELAY_ENABLED
+    void update_relay_pins();
+#endif
+
+    void update_actuators_from_jsbuttons();
+    void update_lights_from_rcin();
+    bool handle_do_motor_test(mavlink_command_int_t command);
     bool init_motor_test();
     bool verify_motor_test();
 
@@ -572,13 +614,41 @@ private:
     ModeCircle mode_circle;
     ModeSurface mode_surface;
     ModeMotordetect mode_motordetect;
+    ModeSurftrak mode_surftrak;
 
     // Auto
     AutoSubMode auto_mode;   // controls which auto controller is run
     GuidedSubMode guided_mode;
 
+#if AP_SCRIPTING_ENABLED
+    ScriptButton script_buttons[4];
+#endif // AP_SCRIPTING_ENABLED
+
 public:
     void mainloop_failsafe_check();
+    bool rangefinder_alt_ok() const WARN_IF_UNUSED;
+
+    static Sub *_singleton;
+
+    static Sub *get_singleton() {
+        return _singleton;
+    }
+
+#if AP_SCRIPTING_ENABLED
+    // For Lua scripting, so index is 1..4, not 0..3
+    bool is_button_pressed(uint8_t index);
+
+    // For Lua scripting, so index is 1..4, not 0..3
+    uint8_t get_and_clear_button_count(uint8_t index);
+
+    // Set targets in GUIDED mode
+    bool set_target_posvelaccel_NED(const Vector3f& target_pos_ned_m, const Vector3f& target_vel_ned_ms, const Vector3f& target_accel_ned_mss, bool use_yaw, float yaw_deg, bool use_yaw_rate, float yaw_rate_degs, bool yaw_relative) override;
+
+#if AP_RANGEFINDER_ENABLED
+    float get_rangefinder_target_cm() const WARN_IF_UNUSED { return mode_surftrak.get_rangefinder_target_cm(); }
+    bool set_rangefinder_target_cm(float new_target_cm) { return mode_surftrak.set_rangefinder_target_cm(new_target_cm); }
+#endif // AP_RANGEFINDER_ENABLED
+#endif // AP_SCRIPTING_ENABLED
 };
 
 extern const AP_HAL::HAL& hal;

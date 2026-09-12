@@ -8,6 +8,7 @@
 
 #include <AP_Param/AP_Param.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
+#include <GCS_MAVLink/ap_message.h>
 #include "AP_Camera_Params.h"
 #include "AP_Camera_shareddefs.h"
 
@@ -22,6 +23,7 @@ class AP_Camera_Mount;
 class AP_Camera_MAVLink;
 class AP_Camera_MAVLinkCamV2;
 class AP_Camera_Scripting;
+class AP_RunCam;
 
 /// @class	Camera
 /// @brief	Object managing a Photo or video camera
@@ -36,6 +38,7 @@ class AP_Camera {
     friend class AP_Camera_MAVLink;
     friend class AP_Camera_MAVLinkCamV2;
     friend class AP_Camera_Scripting;
+    friend class AP_RunCam;
 
 public:
 
@@ -72,6 +75,9 @@ public:
 #if AP_CAMERA_SCRIPTING_ENABLED
         SCRIPTING = 7,  // Scripting backend
 #endif
+#if AP_CAMERA_RUNCAM_ENABLED
+        RUNCAM = 8,  // RunCam backend
+#endif
     };
 
     // detect and initialise backends
@@ -80,40 +86,62 @@ public:
     // update - to be called periodically at 50Hz
     void update();
 
+#if HAL_GCS_ENABLED
     // handle MAVLink messages from the camera
     void handle_message(mavlink_channel_t chan, const mavlink_message_t &msg);
 
     // handle MAVLink command from GCS to control the camera
-    MAV_RESULT handle_command_long(const mavlink_command_long_t &packet);
+    MAV_RESULT handle_command(const mavlink_command_int_t &packet);
 
-    // send camera feedback message to GCS
-    void send_feedback(mavlink_channel_t chan);
+    // send a mavlink message; returns false if there was not space to
+    // send the message, true otherwise
+    bool send_mavlink_message(class GCS_MAVLINK &link, const enum ap_message id);
 
-    // send camera information message to GCS
-    void send_camera_information(mavlink_channel_t chan);
+    // send camera information for a specific instance (0-based) to GCS
+    void send_camera_information(uint8_t instance, mavlink_channel_t chan);
+#endif  // HAL_GCS_ENABLED
 
-    // send camera settings message to GCS
-    void send_camera_settings(mavlink_channel_t chan);
+#if HAL_MAVLINK_BINDINGS_ENABLED
+    // methods to handle mavlink-style instance-id (0 meaning all cameras)
+    MAV_RESULT handle_mav_DO_SET_CAM_TRIGG_DISTANCE(uint8_t instance_id, bool trigger, float dist_m);
+    MAV_RESULT handle_mav_SET_CAMERA_ZOOM(uint8_t instance_id, CAMERA_ZOOM_TYPE mav_zoom_type, float zoom_value);
+    MAV_RESULT handle_mav_SET_CAMERA_FOCUS(uint8_t instance_id, SET_FOCUS_TYPE mav_focus_type, float focus_value);
+#endif  // HAL_MAVLINK_BINDINGS_ENABLED
+
+    // select which instance to send on the next deferred MSG_CAMERA_INFORMATION send
+    void set_camera_information_send_instance(int16_t instance) { _camera_information_send_instance = instance; }
 
     // configure camera
-    void configure(float shooting_mode, float shutter_speed, float aperture, float ISO, float exposure_type, float cmd_id, float engine_cutoff_time);
-    void configure(uint8_t instance, float shooting_mode, float shutter_speed, float aperture, float ISO, float exposure_type, float cmd_id, float engine_cutoff_time);
+    void configure(float shooting_mode, float shutter_speed, float aperture, float ISO, int32_t exposure_type, int32_t cmd_id, float engine_cutoff_time);
+    void configure(uint8_t instance, float shooting_mode, float shutter_speed, float aperture, float ISO, int32_t exposure_type, int32_t cmd_id, float engine_cutoff_time);
 
     // handle camera control
-    void control(float session, float zoom_pos, float zoom_step, float focus_lock, float shooting_cmd, float cmd_id);
-    void control(uint8_t instance, float session, float zoom_pos, float zoom_step, float focus_lock, float shooting_cmd, float cmd_id);
+    void control(float session, float zoom_pos, float zoom_step, float focus_lock, int32_t shooting_cmd, int32_t cmd_id);
+    void control(uint8_t instance, float session, float zoom_pos, float zoom_step, float focus_lock, int32_t shooting_cmd, int32_t cmd_id);
 
     // set camera trigger distance in a mission
-    void set_trigger_distance(float distance_m);
     void set_trigger_distance(uint8_t instance, float distance_m);
 
     // momentary switch to change camera between picture and video modes
     void cam_mode_toggle();
     void cam_mode_toggle(uint8_t instance);
 
-    // take a picture
-    void take_picture();
-    void take_picture(uint8_t instance);
+    // take a picture.  If instance is not provided, all available cameras affected
+    // returns true if at least one camera took a picture
+    bool take_picture();
+    bool take_picture(uint8_t instance);
+
+    // take multiple pictures, time_interval between two consecutive pictures is in miliseconds
+    // if instance is not provided, all available cameras affected
+    // time_interval_ms must be positive
+    // total_num is number of pictures to be taken, -1 means capture forever
+    // returns true if at least one camera is successful
+    bool take_multiple_pictures(uint32_t time_interval_ms, int16_t total_num);
+    bool take_multiple_pictures(uint8_t instance, uint32_t time_interval_ms, int16_t total_num);
+
+    // stop capturing multiple image sequence
+    void stop_capture();
+    bool stop_capture(uint8_t instance);
 
     // start/stop recording video
     // start_recording should be true to start recording, false to stop recording
@@ -135,6 +163,23 @@ public:
     bool set_tracking(TrackingType tracking_type, const Vector2f& p1, const Vector2f& p2);
     bool set_tracking(uint8_t instance, TrackingType tracking_type, const Vector2f& p1, const Vector2f& p2);
 
+#if AP_CAMERA_SET_CAMERA_SOURCE_ENABLED
+    // set camera lens as a value from 0 to 5, instance starts from 0
+    bool set_lens(uint8_t lens);
+    bool set_lens(uint8_t instance, uint8_t lens);
+
+    // camera source handling enum.  This is a one-to-one mapping with the CAMERA_SOURCE mavlink enum
+    // set_camera_source is functionally the same as set_lens except primary and secondary lenses are specified by type
+    enum class CameraSource {
+        DEFAULT = 0,
+        RGB = 1,
+        IR = 2,
+        NDVI = 3,
+        RGB_WIDEANGLE = 4,
+    };
+    bool set_camera_source(uint8_t instance, CameraSource primary_source, CameraSource secondary_source);
+#endif
+
     // set if vehicle is in AUTO mode
     void set_is_auto_mode(bool enable) { _is_in_auto_mode = enable; }
 
@@ -155,7 +200,21 @@ public:
     // accessor to allow scripting backend to retrieve state
     // returns true on success and cam_state is filled in
     bool get_state(uint8_t instance, camera_state_t& cam_state);
+
+    // change camera settings not normally used by autopilot
+    bool change_setting(uint8_t instance, CameraSetting setting, float value);
 #endif
+
+#if AP_CAMERA_INFO_FROM_SCRIPT_ENABLED
+    void set_camera_information(mavlink_camera_information_t camera_info);
+    void set_camera_information(uint8_t instance, mavlink_camera_information_t camera_info);
+
+    void set_stream_information(mavlink_video_stream_information_t camera_info);
+    void set_stream_information(uint8_t instance, mavlink_video_stream_information_t camera_info);
+#endif // AP_CAMERA_INFO_FROM_SCRIPT_ENABLED
+
+    // Return true and the relay index if relay camera backend is selected, used for conversion to relay functions
+    bool get_legacy_relay_index(int8_t &index) const;
 
     // allow threads to lock against AHRS update
     HAL_Semaphore &get_semaphore() { return _rsem; }
@@ -176,6 +235,11 @@ protected:
 
     // parameters for backends
     AP_Camera_Params _params[AP_CAMERA_MAX_INSTANCES];
+#if AP_CAMERA_RUNCAM_ENABLED
+    // var info pointer for RunCam
+    static const struct AP_Param::GroupInfo *_backend_var_info[AP_CAMERA_MAX_INSTANCES];
+    uint8_t _runcam_instances;
+#endif
 
 private:
 
@@ -190,12 +254,45 @@ private:
 
     // perform any required parameter conversion
     void convert_params();
+#if AP_CAMERA_RUNCAM_ENABLED && (AP_CAMERA_MAX_INSTANCES > 1)
+    void convert_runcam_params();
+#endif // AP_CAMERA_RUNCAM_ENABLED && (AP_CAMERA_MAX_INSTANCES > 1)
+
+    // send camera feedback message to GCS
+    void send_feedback(mavlink_channel_t chan);
+
+    // send camera information message to GCS
+    void send_camera_information(mavlink_channel_t chan);
+
+#if AP_MAVLINK_MSG_VIDEO_STREAM_INFORMATION_ENABLED
+    void send_video_stream_information(mavlink_channel_t chan);
+#endif // AP_MAVLINK_MSG_VIDEO_STREAM_INFORMATION_ENABLED
+
+    // send camera settings message to GCS
+    void send_camera_settings(mavlink_channel_t chan);
+
+#if AP_CAMERA_SEND_FOV_STATUS_ENABLED
+    // send camera field of view status
+    void send_camera_fov_status(mavlink_channel_t chan);
+#endif
+
+    // send camera capture status message to GCS
+    void send_camera_capture_status(mavlink_channel_t chan);
+
+#if AP_CAMERA_SEND_THERMAL_RANGE_ENABLED
+    // send camera thermal range message to GCS
+    void send_camera_thermal_range(mavlink_channel_t chan);
+#endif
 
     HAL_Semaphore _rsem;                // semaphore for multi-thread access
     AP_Camera_Backend *primary;         // primary camera backed
     bool _is_in_auto_mode;              // true if in AUTO mode
     uint32_t log_camera_bit;            // logging bit (from LOG_BITMASK) to enable camera logging
     AP_Camera_Backend *_backends[AP_CAMERA_MAX_INSTANCES];  // pointers to instantiated backends
+    // Stashes the 0-based instance requested by MAV_CMD_REQUEST_MESSAGE(CAMERA_INFORMATION, param2).
+    // Used to pass the target instance through the deferred-message path so that COMMAND_ACK is
+    // transmitted before the CAMERA_INFORMATION response.  -1 means send for all instances.
+    int16_t _camera_information_send_instance = -1;
 };
 
 namespace AP {

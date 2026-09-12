@@ -95,6 +95,9 @@ bool AP_FlashStorage::init(void)
         first_sector = 0;
     }
 
+    // update current sector in case first sector has changed
+    current_sector = first_sector;
+
     // load data from any current sectors
     for (uint8_t i=0; i<2; i++) {
         uint8_t sector = (first_sector + i) & 1;
@@ -152,7 +155,7 @@ bool AP_FlashStorage::switch_full_sector(void)
 }
 
 // protected_switch_full_sector is protected by switch_full_sector to
-// avoid an infinite recursion problem; switch_full_sectory calls
+// avoid an infinite recursion problem; switch_full_sector calls
 // write() which can call switch_full_sector.  This has been seen in
 // practice, and while it might be caused by corruption... corruption
 // happens.

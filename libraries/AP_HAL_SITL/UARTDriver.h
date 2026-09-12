@@ -6,9 +6,10 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "AP_HAL_SITL_Namespace.h"
-#include <AP_HAL/utility/Socket.h>
+#include <AP_HAL/utility/Socket_native.h>
 #include <AP_HAL/utility/RingBuffer.h>
 #include <AP_CSVReader/AP_CSVReader.h>
+#include <AP_HAL/utility/DataRateLimit.h>
 
 #include <SITL/SIM_SerialDevice.h>
 
@@ -30,6 +31,7 @@ public:
     }
 
     ssize_t get_system_outqueue_length() const;
+    ssize_t get_system_outqueue_limit() const;
 
     bool tx_pending() override {
         return false;
@@ -40,11 +42,14 @@ public:
 
     bool _unbuffered_writes;
 
-    enum flow_control get_flow_control(void) override { return FLOW_CONTROL_ENABLE; }
+    void set_flow_control(enum flow_control flow_control_setting) override;
+    enum flow_control get_flow_control(void) override;
 
     void configure_parity(uint8_t v) override;
     void set_stop_bits(int n) override;
     bool set_unbuffered_writes(bool on) override;
+
+    uint32_t bw_in_bytes_per_second() const override;
 
     void _timer_tick(void) override;
 
@@ -63,6 +68,13 @@ public:
      */
     uint64_t receive_time_constraint_us(uint16_t nbytes) override;
 
+    uint32_t get_baud_rate() const override { return _uart_baudrate; }
+
+#if HAL_UART_STATS_ENABLED
+    // request information on uart I/O
+    void uart_info(ExpandingString &str, StatsTracker &stats, const uint32_t dt_ms) override;
+#endif
+
 private:
 
     int _fd;
@@ -73,8 +85,8 @@ private:
     uint8_t _portNumber;
     bool _connected = false; // true if a client has connected
     bool _use_send_recv = false;
+    bool _is_unix_socket = false;
     int _listen_fd;  // socket we are listening on
-    struct sockaddr_in _listen_sockaddr;
     int _serial_port;
     static bool _console;
     ByteBuffer _readbuffer{16384};
@@ -86,11 +98,12 @@ private:
 
     const char *_uart_path;
     uint32_t _uart_baudrate;
-
-    // IPv4 address of target for uartC
-    const char *_tcp_client_addr;
+    enum flow_control _flow_control = FLOW_CONTROL_DISABLE;
+    uint32_t _auto_flow_start_ms;   // time AUTO mode first had pending data to write
+    bool _auto_flow_detected;   // true once CTS confirmed active in AUTO mode
 
     void _tcp_start_connection(uint16_t port, bool wait_for_connection);
+    void _unix_start_connection(const char *path, bool wait_for_connection);
     void _uart_start_connection(void);
     void _check_reconnect();
     void _tcp_start_client(const char *address, uint16_t port);
@@ -98,7 +111,7 @@ private:
     void _udp_start_multicast(const char *address, uint16_t port);
     void _check_connection(void);
     static bool _select_check(int );
-    static void _set_nonblocking(int );
+
     bool set_speed(int speed) const;
 
     SITL_State *_sitlState;
@@ -108,8 +121,12 @@ private:
     uint16_t _mc_myport;
 
     // for baud-rate limiting:
-    uint32_t last_read_tick_us;
-    uint32_t last_write_tick_us;
+    struct {
+        DataRateLimit write;
+        DataRateLimit read;
+    } baud_limits;
+
+    HAL_Semaphore write_mtx;
 
     SITL::SerialDevice *_sim_serial_device;
 
@@ -138,9 +155,20 @@ protected:
     void _flush() override;
     bool _discard_input() override;
 
+#if HAL_UART_STATS_ENABLED
+    // Getters for cumulative tx and rx counts
+    uint32_t get_total_tx_bytes() const override { return _tx_stats_bytes; }
+    uint32_t get_total_rx_bytes() const override { return _rx_stats_bytes; }
+#endif
+
 private:
     void handle_writing_from_writebuffer_to_device();
     void handle_reading_from_device_to_readbuffer();
+
+    // statistics
+    uint32_t _tx_stats_bytes;
+    uint32_t _rx_stats_bytes;
+
 };
 
 #endif

@@ -13,6 +13,7 @@
 #include <AP_HAL/Device.h>
 
 #include "AP_Compass_Backend.h"
+#include <AP_InertialSensor/AP_InertialSensor_config.h>
 
 class AuxiliaryBus;
 class AuxiliaryBusSlave;
@@ -26,7 +27,9 @@ public:
                                      bool force_external,
                                      enum Rotation rotation);
 
+#if AP_INERTIALSENSOR_ENABLED
     static AP_Compass_Backend *probe_mpu6000(enum Rotation rotation);
+#endif
 
     static constexpr const char *name = "HMC5843";
 
@@ -59,8 +62,6 @@ private:
     int16_t _mag_x;
     int16_t _mag_y;
     int16_t _mag_z;
-
-    uint8_t _compass_instance;
 
     enum Rotation _rotation;
     
@@ -124,6 +125,7 @@ private:
     AP_HAL::OwnPtr<AP_HAL::Device> _dev;
 };
 
+#if AP_INERTIALSENSOR_ENABLED
 class AP_HMC5843_BusDriver_Auxiliary : public AP_HMC5843_BusDriver
 {
 public:
@@ -153,5 +155,6 @@ private:
     AuxiliaryBusSlave *_slave;
     bool _started;
 };
+#endif  // AP_INERTIALSENSOR_ENABLED
 
 #endif // AP_COMPASS_HMC5843_ENABLED

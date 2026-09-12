@@ -5,8 +5,6 @@ AP_FLAKE8_CLEAN
 
 '''
 
-from __future__ import print_function
-
 import math
 import operator
 import os
@@ -14,28 +12,31 @@ import os
 from pymavlink import mavextra
 from pymavlink import mavutil
 
-from common import AutoTest
-from common import NotAchievedException
+import vehicle_test_suite
+
+from vehicle_test_suite import AltFrame
+from vehicle_test_suite import Location
+from vehicle_test_suite import NotAchievedException
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
-SITL_START_LOCATION = mavutil.location(-27.274439, 151.290064, 343, 8.7)
+SITL_START_LOCATION = Location(-27.274439, 151.290064, 343, AltFrame.ABSOLUTE)
+SITL_START_HEADING = 8.7
 
 
-class AutoTestTracker(AutoTest):
+class AutoTestTracker(vehicle_test_suite.TestSuite):
 
     def log_name(self):
         return "AntennaTracker"
-
-    def default_speedup(self):
-        '''Tracker seems to be race-free'''
-        return 100
 
     def test_filepath(self):
         return os.path.realpath(__file__)
 
     def sitl_start_location(self):
         return SITL_START_LOCATION
+
+    def sitl_start_heading(self):
+        return SITL_START_HEADING
 
     def default_mode(self):
         return "AUTO"
@@ -116,28 +117,36 @@ class AutoTestTracker(AutoTest):
                 self.set_rc(chan, pwm)
                 self.wait_servo_channel_value(chan, pwm)
 
-    def SERVOTEST(self):
+    def MAV_CMD_DO_SET_SERVO(self):
         '''Test SERVOTEST mode'''
         self.change_mode(0) # "MANUAL"
         # magically changes to SERVOTEST (3)
-        for value in 1900, 1200:
-            channel = 1
-            self.run_cmd(
-                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
-                p1=channel,
-                p2=value,
-                timeout=1,
-            )
-            self.wait_servo_channel_value(channel, value)
-        for value in 1300, 1670:
-            channel = 2
-            self.run_cmd(
-                mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
-                p1=channel,
-                p2=value,
-                timeout=1,
-            )
-            self.wait_servo_channel_value(channel, value)
+        for method in self.run_cmd, self.run_cmd_int:
+            for value in 1900, 1200:
+                channel = 1
+                method(
+                    mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                    p1=channel,
+                    p2=value,
+                    timeout=1,
+                )
+                self.wait_servo_channel_value(channel, value)
+            for value in 1300, 1670:
+                channel = 2
+                method(
+                    mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+                    p1=channel,
+                    p2=value,
+                    timeout=1,
+                )
+                self.wait_servo_channel_value(channel, value)
+
+    def MAV_CMD_MISSION_START(self):
+        '''test MAV_CMD_MISSION_START mavlink command'''
+        for method in self.run_cmd, self.run_cmd_int:
+            self.change_mode(0)  # "MANUAL"
+            method(mavutil.mavlink.MAV_CMD_MISSION_START)
+            self.wait_mode("AUTO")
 
     def SCAN(self):
         '''Test SCAN mode'''
@@ -154,11 +163,96 @@ class AutoTestTracker(AutoTest):
                                           timeout=90,
                                           comparator=operator.le)
 
+    def BaseMessageSet(self):
+        '''ensure we're getting messages we expect'''
+        self.set_parameter('BATT_MONITOR', 4)
+        self.reboot_sitl()
+        for msg in 'BATTERY_STATUS', :
+            self.assert_receive_message(msg)
+
     def disabled_tests(self):
         return {
             "ArmFeatures": "See https://github.com/ArduPilot/ardupilot/issues/10652",
             "CPUFailsafe": " tracker doesn't have a CPU failsafe",
         }
+
+    def GPSForYaw(self):
+        '''Moving baseline GPS yaw'''
+        self.load_default_params_file("tracker-gps-for-yaw.parm")
+        self.reboot_sitl()
+
+        self.wait_gps_fix_type_gte(6, message_type="GPS2_RAW", verbose=True)
+        tstart = self.get_sim_time()
+        while True:
+            if self.get_sim_time_cached() - tstart > 20:
+                break
+            m_gps_raw = self.assert_receive_message("GPS2_RAW", verbose=True)
+            m_sim = self.assert_receive_message("SIMSTATE", verbose=True)
+            gps_raw_hdg = m_gps_raw.yaw * 0.01
+            sim_hdg = mavextra.wrap_360(math.degrees(m_sim.yaw))
+            if abs(gps_raw_hdg - sim_hdg) > 5:
+                raise NotAchievedException("GPS_RAW not tracking simstate yaw")
+            self.progress(f"yaw match ({gps_raw_hdg} vs {sim_hdg}")
+
+    def StationaryGlobalPositionIntAlt(self):
+        '''Test GLOBAL_POSITION_INT.alt is correct in stationary mode'''
+        # Disable GPS so the tracker stays in stationary mode (stationary=true).
+        # With GPS enabled the tracker gets a fix, sets stationary=false, and
+        # delegates to the base-class send_global_position_int() which is correct.
+        self.set_parameter("GPS1_TYPE", 0)
+        self.reboot_sitl()
+
+        # Set a known home position; Tracker::set_home() stores this in
+        # current_loc, which the stationary path uses directly.
+        home_loc = self.sitl_start_location()
+        self.set_home(home_loc)
+
+        self.assert_received_message_field_values("GLOBAL_POSITION_INT", {
+            "alt": int(home_loc.get_alt_m(AltFrame.ABSOLUTE) * 1000),
+        })
+
+    def LoggerMsgChunks(self):
+        '''create MSG dataflash entries for very long messages'''
+        self.assert_parameter_value('LOG_DISARMED', 1)
+        short_message_text = "This is a short message"
+        long_message_text = "This is undubitably a ridiculously verbose and needlessly wordy missive, unavoidably designed to exceed disappointingly minuscule log buffers"  # noqa:E501
+        self.send_statustext(short_message_text)
+        self.send_statustext(long_message_text)
+
+        self.delay_sim_time(10, reason="statustext to be logged")
+        dfreader = self.dfreader_for_current_onboard_log()
+        self.reboot_sitl()
+
+        phase = "short"
+        seq = 0
+        received_long_message_text = ""
+        while True:
+            m = dfreader.recv_match(type='MSG')
+            if m is None:
+                break
+            self.progress(f"{m.Message=}")
+            msg = m.Message.removeprefix("SRC=250/250:")
+            if phase == "short":
+                if msg != short_message_text:
+                    continue
+                self.progress("Received short message")
+                phase = "long"
+            elif phase == "long":
+                if m.Seq != seq:
+                    received_long_message_text = ""
+                    seq = 0
+                    if m.Seq != 0:
+                        raise NotAchievedException("Weird")
+                else:
+                    seq += 1
+                received_long_message_text += msg
+                self.progress(f"Text: {received_long_message_text}")
+                if received_long_message_text == long_message_text:
+                    phase = "done"
+                    break
+
+        if phase != "done":
+            raise NotAchievedException(f"Did not get message text; {phase=}")  # noqa:E501
 
     def tests(self):
         '''return list of all tests'''
@@ -166,8 +260,13 @@ class AutoTestTracker(AutoTest):
         ret.extend([
             self.GUIDED,
             self.MANUAL,
-            self.SERVOTEST,
+            self.MAV_CMD_DO_SET_SERVO,
+            self.MAV_CMD_MISSION_START,
             self.NMEAOutput,
             self.SCAN,
+            self.BaseMessageSet,
+            self.GPSForYaw,
+            self.LoggerMsgChunks,
+            self.StationaryGlobalPositionIntAlt,
         ])
         return ret

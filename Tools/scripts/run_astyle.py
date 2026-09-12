@@ -6,32 +6,51 @@ Runs astyle over directory sub-trees known to be "astyle-clean"
  AP_FLAKE8_CLEAN
 """
 
+import argparse
+import contextlib
 import os
 import pathlib
 import subprocess
 import sys
 
-import argparse
-
 os.environ['PYTHONUNBUFFERED'] = '1'
+DRY_RUN_DEFAULT = False
 
 
 class AStyleChecker(object):
-    def __init__(self):
+    def __init__(self, *, dry_run=DRY_RUN_DEFAULT):
         self.retcode = 0
         self.directories_to_check = [
             'libraries/AP_DDS',
+            'libraries/AP_ExternalControl',
+            'libraries/AP_GSOF',
         ]
-        self.files_to_check = []
+        self.files_to_check = [
+            pathlib.Path(s) for s in [
+                'ArduCopter/AP_ExternalControl_Copter.cpp',
+                'ArduCopter/AP_ExternalControl_Copter.h',
+                'libraries/AP_ExternalAHRS/AP_ExternalAHRS_MicroStrain7.cpp',
+                'libraries/AP_ExternalAHRS/AP_ExternalAHRS_MicroStrain7.h',
+                'Rover/AP_ExternalControl_Rover.cpp',
+                'Rover/AP_ExternalControl_Rover.h',
+            ]
+        ]
+        self.dry_run = dry_run
 
     def progress(self, string):
-        print("****** %s" % (string,))
+        print(f"****** {string}")
 
     def check(self):
         '''run astyle on all files in self.files_to_check'''
         # for path in self.files_to_check:
         #     self.progress("Checking (%s)" % path)
-        astyle_command = ["astyle", "--dry-run"]
+        astyle_command = ["astyle"]
+        # Show the astyle version suppressing all exceptions
+        with contextlib.suppress():
+            _ = subprocess.run(astyle_command + ["--version"])
+        if self.dry_run:
+            astyle_command.append("--dry-run")
+
         astyle_command.append("--options=Tools/CodeStyle/astylerc")
         astyle_command.extend(self.files_to_check)
         ret = subprocess.run(
@@ -41,10 +60,10 @@ class AStyleChecker(object):
             text=True
         )
         if ret.returncode != 0:
-            self.progress("astyle check failed: (%s)" % (ret.stdout))
+            self.progress(f"astyle check failed: ({ret.stdout})")
             self.retcode = 1
         if "Formatted" in ret.stdout:
-            self.progress("Files needing formatting found")
+            self.progress("Files needing formatting found.")
             print(ret.stdout)
             self.retcode = 1
 
@@ -57,9 +76,12 @@ class AStyleChecker(object):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Check all Python files for astyle cleanliness')
-    # parser.add_argument('--build', action='store_true', default=False, help='build as well as configure')
+    parser = argparse.ArgumentParser(description='Check C and C++ files for astyle cleanliness')
+    parser.add_argument('--dry-run',
+                        action='store_true',
+                        default=DRY_RUN_DEFAULT,
+                        help='Perform a trial run with no changes made to check for formatting')
     args = parser.parse_args()
 
-    checker = AStyleChecker()
+    checker = AStyleChecker(dry_run=args.dry_run)
     sys.exit(checker.run())

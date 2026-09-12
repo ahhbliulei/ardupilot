@@ -82,6 +82,9 @@ SECTIONS
         KEEP(*(.vectors))
         __vectors_end__ = .;
     } > dataram AT > default_flash
+    __firmware_crc_start__ = LOADADDR(vectors);
+    __firmware_crc_ext_start__ = 0;
+    __firmware_crc_ext_end__ = 0;
 
     constructors : ALIGN(4) SUBALIGN(4)
     {
@@ -105,8 +108,8 @@ SECTIONS
         . = ALIGN(4);
         __ram3_init_text__ = LOADADDR(.fastramfunc);
         __ram3_init__ = .;
-        /* ChibiOS won't boot unless these are excluded */
-        EXCLUDE_FILE (*vectors.o *crt0_v7m.o *crt1.o *board.o)
+        /* ChibiOS won't boot unless some of these are excluded */
+        EXCLUDE_FILE (*vectors.o *crt0_v7m.o *crt1.o *board.o *chprintf.o)
         /* performance critical sections of ChibiOS */
         *libch.a:ch*.*(.text*)
         *libch.a:nvic.*(.text*)
@@ -342,6 +345,7 @@ SECTIONS
         *(.ram0_init.*)
         . = ALIGN(4);
     } > ram0 AT > default_flash
+    __firmware_crc_end__ = LOADADDR(.ram0_init) + SIZEOF(.ram0_init);
 
     .ram0 (NOLOAD) : ALIGN(4)
     {

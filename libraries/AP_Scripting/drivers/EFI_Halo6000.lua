@@ -2,6 +2,11 @@
   EFI Scripting backend driver for Halo6000 generator
 --]]
 
+---@diagnostic disable: param-type-mismatch
+---@diagnostic disable: undefined-field
+---@diagnostic disable: missing-parameter
+---@diagnostic disable: need-check-nil
+
 -- Check Script uses a miniumum firmware version
 local SCRIPT_AP_VERSION = 4.3
 local SCRIPT_NAME       = "EFI: Halo6000 CAN"
@@ -50,7 +55,7 @@ end
 local efi_backend = nil
 
 -- Setup EFI Parameters
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 6), 'could not add EFI_H6K param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 10), 'could not add EFI_H6K param table')
 
 --[[
   // @Param: EFI_H6K_ENABLE
@@ -115,7 +120,6 @@ if not driver1 then
     gcs:send_text(0, string.format("EFI_H6K: Failed to load driver"))
     return
 end
-
 
 --[[
    EFI Engine Object
@@ -199,8 +203,11 @@ local function engine_control()
        
        efi_state:last_updated_ms(millis())
 
-        -- Set the EFI_State into the EFI scripting driver
-        efi_backend:handle_scripting(efi_state)
+       -- Set the EFI_State into the EFI scripting driver
+       efi_backend:handle_scripting(efi_state)
+
+       logger.write('H6K','Curr,Volt,CoolT,CylT,FuelPct', 'fffff',
+                    out_current, out_volt, cool_temp, cyl_temp, fuel_pct)
     end
 
     -- update telemetry output for extra telemetry values
@@ -222,14 +229,14 @@ local function engine_control()
 
     -- send a frame with checksum
     function self.write_frame_checksum(msg)
-       local sum = 0
-       for i=0, 7 do
-          sum = sum + msg:data(i)
-       end
-       sum = sum % 0xff
-       msg:data(7, sum)
-       msg:dlc(8)
-       driver1:write_frame(msg, 10000)
+        local sum = 0
+        for i = 0, 6 do
+        sum = sum + msg:data(i)
+        end
+        local checksum = (0 - sum) % 0x100
+        msg:data(7, checksum)
+        msg:dlc(8)
+        driver1:write_frame(msg, 10000)
     end
 
     -- send an engine start command
@@ -237,6 +244,7 @@ local function engine_control()
        local msg = CANFrame()
        msg:id(0x1A0)
        msg:data(0,1)
+       msg:data(7,1)
        self.write_frame_checksum(msg)
     end
 
@@ -301,7 +309,7 @@ local function engine_control()
     
     -- return the instance
     return self
-end -- end function engine_control(_driver)
+end -- end function engine_control()
 
 local engine1 = engine_control()
 

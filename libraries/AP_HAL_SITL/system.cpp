@@ -1,4 +1,6 @@
 #include <stdarg.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -9,6 +11,7 @@
 #include <AP_HAL/system.h>
 
 #include "Scheduler.h"
+#include <AP_Math/div1000.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -17,19 +20,22 @@ using HALSITL::Scheduler;
 namespace AP_HAL {
 
 static struct {
-    struct timeval start_time;
+    uint64_t start_time_ns;
 } state;
 
+static uint64_t ts_to_nsec(struct timespec &ts)
+{
+    return ts.tv_sec*1000000000ULL + ts.tv_nsec;
+}
+    
 void init()
 {
-    gettimeofday(&state.start_time, nullptr);
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    state.start_time_ns = ts_to_nsec(ts);
 }
 
-#if defined(__CYGWIN__) || defined(__CYGWIN64__) || defined(CYGWIN_BUILD)
-void panic(const char *errormsg, ...)
-#else
 void WEAK panic(const char *errormsg, ...)
-#endif
 {
     va_list ap;
 
@@ -46,6 +52,7 @@ void WEAK panic(const char *errormsg, ...)
     if (getenv("SITL_PANIC_EXIT")) {
         // this is used on the autotest server to prevent us waiting
         // 10 hours for a timeout
+        printf("panic and SITL_PANIC_EXIT set - exitting");
         exit(1);
     }
     for(;;);
@@ -57,21 +64,41 @@ static void run_command_on_ownpid(const char *commandname)
     // find dumpstack command:
     const char *command_filepath = commandname; // if we can't find it trust in PATH
     struct stat statbuf;
+    const char *custom_scripts_dir_path = getenv("AP_SCRIPTS_DIR_PATH");
+    char *custom_scripts_dir_path_pattern = nullptr;
+    if (custom_scripts_dir_path != nullptr) {
+        if (asprintf(&custom_scripts_dir_path_pattern, "%s/%%s", custom_scripts_dir_path) == -1) {
+            custom_scripts_dir_path_pattern = nullptr;
+        }
+    }
     const char *paths[] {
+        custom_scripts_dir_path_pattern,
         "Tools/scripts/%s",
         "APM/Tools/scripts/%s", // for autotest server
         "../Tools/scripts/%s", // when run from e.g. ArduCopter subdirectory
     };
-    char buffer[60];
+    // long enough for an absolute path from AP_SCRIPTS_DIR_PATH; the 60
+    // bytes this used to be was not - a checkout under a path of any
+    // length silently truncated, and the truncated name simply failed to
+    // stat, so the override looked as though it had been ignored
+    char buffer[PATH_MAX];
     for (uint8_t i=0; i<ARRAY_SIZE(paths); i++) {
+        if (paths[i] == nullptr) {
+            continue;
+        }
         // form up a filepath from each path and commandname; if it
         // exists, use it
-        snprintf(buffer, sizeof(buffer), paths[i], commandname);
+        const int len = snprintf(buffer, sizeof(buffer), paths[i], commandname);
+        if (len < 0 || (unsigned)len >= sizeof(buffer)) {
+            // truncated, so this is not the path we were asked for
+            continue;
+        }
         if (::stat(buffer, &statbuf) != -1) {
             command_filepath = buffer;
             break;
         }
     }
+    free(custom_scripts_dir_path_pattern);
 
 	char progname[100];
 	int n = readlink("/proc/self/exe", progname, sizeof(progname)-1);
@@ -95,7 +122,9 @@ static void run_command_on_ownpid(const char *commandname)
              commandname,
              p+1,
              (int)getpid());
-    char cmd[200];
+    // must fit the command filepath found above, which may now be
+    // an absolute path, plus the output filepath
+    char cmd[PATH_MAX + sizeof(output_filepath) + 32];
 	snprintf(cmd,
              sizeof(cmd),
              "sh %s %d >%s 2>&1",
@@ -116,18 +145,40 @@ static void run_command_on_ownpid(const char *commandname)
         fprintf(stderr, "Failed to open stack dump filepath: %m");
         return;
     }
+    fflush(stderr);  // we are about to write(2) around it
     char buf[1024]; // let's hope we're not here because we ran out of stack
     while (true) {
         const ssize_t ret = read(fd, buf, ARRAY_SIZE(buf));
         if (ret == -1) {
+            if (errno == EINTR) {
+                // one of our timers, not a real error
+                continue;
+            }
             fprintf(stderr, "Read error: %m");
             break;
         }
         if (ret == 0) {
             break;
         }
-        if (write(2, buf, ret) != ret) {
-            // *sigh*
+        // write() is allowed to write less than it was asked to - stderr
+        // is a pipe when run from autotest, and a signal can cut a write
+        // short - so keep going until the whole block is out.  Treating a
+        // short write as fatal silently truncated the output, which is
+        // the one thing we came here to collect.
+        ssize_t written = 0;
+        while (written < ret) {
+            const ssize_t wrote = write(2, &buf[written], ret - written);
+            if (wrote == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            written += wrote;
+        }
+        if (written != ret) {
+            fprintf(stderr, "Write error after %d of %d bytes: %m\n",
+                    (int)written, (int)ret);
             break;
         }
     }
@@ -152,14 +203,6 @@ uint32_t millis()
 {
     return millis64() & 0xFFFFFFFF;
 }
-
-/*
-  we define a millis16() here to avoid an issue with sitl builds in cygwin
- */
-uint16_t millis16()
-{
-    return millis64() & 0xFFFF;
-}
     
 uint64_t micros64()
 {
@@ -169,89 +212,14 @@ uint64_t micros64()
         return stopped_usec;
     }
 
-    struct timeval tp;
-    gettimeofday(&tp, nullptr);
-    uint64_t ret = 1.0e6 * ((tp.tv_sec + (tp.tv_usec * 1.0e-6)) -
-                            (state.start_time.tv_sec +
-                             (state.start_time.tv_usec * 1.0e-6)));
-    return ret;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return uint64_div1000(ts_to_nsec(ts) - state.start_time_ns);
 }
 
 uint64_t millis64()
 {
-    const HALSITL::Scheduler* scheduler = HALSITL::Scheduler::from(hal.scheduler);
-    uint64_t stopped_usec = scheduler->stopped_clock_usec();
-    if (stopped_usec) {
-        return stopped_usec / 1000;
-    }
-
-    struct timeval tp;
-    gettimeofday(&tp, nullptr);
-    uint64_t ret = 1.0e3*((tp.tv_sec + (tp.tv_usec*1.0e-6)) -
-                          (state.start_time.tv_sec +
-                           (state.start_time.tv_usec*1.0e-6)));
-    return ret;
+    return uint64_div1000(micros64());
 }
-
-
-uint32_t native_micros()
-{
-#if AP_TEST_DRONECAN_DRIVERS
-    return micros();
-#else
-    return native_micros64() & 0xFFFFFFFF;
-#endif
-}
-
-uint32_t native_millis()
-{
-#if AP_TEST_DRONECAN_DRIVERS
-    return millis();
-#else
-    return native_millis64() & 0xFFFFFFFF;
-#endif
-}
-
-/*
-  we define a millis16() here to avoid an issue with sitl builds in cygwin
- */
-uint16_t native_millis16()
-{
-#if AP_TEST_DRONECAN_DRIVERS
-    return millis16();
-#else
-    return native_millis64() & 0xFFFF;
-#endif
-}
-    
-
-uint64_t native_micros64()
-{
-#if AP_TEST_DRONECAN_DRIVERS
-    return micros64();
-#else
-    struct timeval tp;
-    gettimeofday(&tp, nullptr);
-    uint64_t ret = 1.0e6 * ((tp.tv_sec + (tp.tv_usec * 1.0e-6)) -
-                            (state.start_time.tv_sec +
-                             (state.start_time.tv_usec * 1.0e-6)));
-    return ret;
-#endif
-}
-
-uint64_t native_millis64()
-{
-#if AP_TEST_DRONECAN_DRIVERS
-    return millis64();
-#else
-    struct timeval tp;
-    gettimeofday(&tp, nullptr);
-    uint64_t ret = 1.0e3*((tp.tv_sec + (tp.tv_usec*1.0e-6)) -
-                          (state.start_time.tv_sec +
-                           (state.start_time.tv_usec*1.0e-6)));
-    return ret;
-#endif
-}
-
 
 } // namespace AP_HAL

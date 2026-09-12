@@ -1,11 +1,13 @@
+#include "AP_CustomRotations_config.h"
+
+#if AP_CUSTOMROTATIONS_ENABLED
+
 #include "AP_CustomRotations.h"
 
 #include <AP_InternalError/AP_InternalError.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 #include <AP_HAL/AP_HAL_Boards.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
-
-#if !APM_BUILD_TYPE(APM_BUILD_AP_Periph)
 
 const AP_Param::GroupInfo AP_CustomRotations::var_info[] = {
 
@@ -67,20 +69,6 @@ void AP_CustomRotations::init()
     }
 }
 
-void AP_CustomRotations::convert(Rotation r, float roll, float pitch, float yaw)
-{
-    AP_CustomRotation* rot = get_rotation(r);
-    if (rot == nullptr) {
-        return;
-    }
-    if (!rot->params.roll.configured() && !rot->params.pitch.configured() && !rot->params.yaw.configured()) {
-        rot->params.roll.set_and_save(roll);
-        rot->params.pitch.set_and_save(pitch);
-        rot->params.yaw.set_and_save(yaw);
-        rot->init();
-    }
-}
-
 void AP_CustomRotations::set(Rotation r, float roll, float pitch, float yaw)
 {
     AP_CustomRotation* rot = get_rotation(r);
@@ -137,7 +125,7 @@ AP_CustomRotation* AP_CustomRotations::get_rotation(Rotation r)
     }
     const uint8_t index = r - ROTATION_CUSTOM_1;
     if (rotations[index] == nullptr) {
-        rotations[index] = new AP_CustomRotation(params[index]);
+        rotations[index] = NEW_NOTHROW AP_CustomRotation(params[index]);
          // make sure param is enabled if custom rotation is used
         enable.set_and_save_ifchanged(1);
     }
@@ -156,4 +144,4 @@ AP_CustomRotations &custom_rotations()
 
 }
 
-#endif // !APM_BUILD_TYPE(APM_BUILD_AP_Periph)
+#endif  // AP_CUSTOMROTATIONS_ENABLED

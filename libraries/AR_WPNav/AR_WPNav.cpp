@@ -18,6 +18,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include "AR_WPNav.h"
 #include <GCS_MAVLink/GCS.h>
+#include <AP_InternalError/AP_InternalError.h>
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
 #include <stdio.h>
@@ -87,9 +88,9 @@ const AP_Param::GroupInfo AR_WPNav::var_info[] = {
 };
 
 AR_WPNav::AR_WPNav(AR_AttitudeControl& atc, AR_PosControl &pos_control) :
+    _pivot(atc),
     _atc(atc),
-    _pos_control(pos_control),
-    _pivot(atc)
+    _pos_control(pos_control)
 {
     AP_Param::setup_object_defaults(this, var_info);
 }
@@ -233,8 +234,8 @@ bool AR_WPNav::set_desired_location(const Location& destination, Location next_d
     // convert origin and destination to offset from EKF origin
     Vector2f origin_NE;
     Vector2f destination_NE;
-    if (!_origin.get_vector_xy_from_origin_NE(origin_NE) ||
-        !_destination.get_vector_xy_from_origin_NE(destination_NE)) {
+    if (!_origin.get_vector_xy_from_origin_NE_cm(origin_NE) ||
+        !_destination.get_vector_xy_from_origin_NE_cm(destination_NE)) {
         INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
         return false;
     }
@@ -246,13 +247,15 @@ bool AR_WPNav::set_desired_location(const Location& destination, Location next_d
         // skip recalculating this leg by simply shifting next leg
         _scurve_this_leg = _scurve_next_leg;
     } else {
-        _scurve_this_leg.calculate_track(Vector3f{origin_NE.x, origin_NE.y, 0.0f},              // origin
-                                         Vector3f{destination_NE.x, destination_NE.y, 0.0f},    // destination
+        _scurve_this_leg.calculate_track(Vector3p{origin_NE.x, origin_NE.y, 0.0f},              // origin
+                                         Vector3p{destination_NE.x, destination_NE.y, 0.0f},    // destination
+                                         0.0, // arc length is zero for straight track
                                          _pos_control.get_speed_max(),
                                          _pos_control.get_speed_max(),  // speed up (not used)
                                          _pos_control.get_speed_max(),  // speed down (not used)
                                          _pos_control.get_accel_max(),  // forward back acceleration
                                          _pos_control.get_accel_max(),  // vertical accel (not used)
+                                         _pos_control.get_accel_max(),  // corner acceleration
                                          AR_WPNAV_SNAP_MAX,             // snap
                                          _pos_control.get_jerk_max());
     }
@@ -268,18 +271,20 @@ bool AR_WPNav::set_desired_location(const Location& destination, Location next_d
         if (!_pivot_at_next_wp) {
             // convert next_destination to offset from EKF origin
             Vector2f next_destination_NE;
-            if (!next_destination.get_vector_xy_from_origin_NE(next_destination_NE)) {
+            if (!next_destination.get_vector_xy_from_origin_NE_cm(next_destination_NE)) {
                 INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control);
                 return false;
             }
             next_destination_NE *= 0.01f;
-            _scurve_next_leg.calculate_track(Vector3f{destination_NE.x, destination_NE.y, 0.0f},
-                                             Vector3f{next_destination_NE.x, next_destination_NE.y, 0.0f},
+            _scurve_next_leg.calculate_track(Vector3p{destination_NE.x, destination_NE.y, 0.0f},
+                                             Vector3p{next_destination_NE.x, next_destination_NE.y, 0.0f},
+                                             0.0, // arc length is zero for straight track
                                              _pos_control.get_speed_max(),
                                              _pos_control.get_speed_max(),  // speed up (not used)
                                              _pos_control.get_speed_max(),  // speed down (not used)
                                              _pos_control.get_accel_max(),  // forward back acceleration
                                              _pos_control.get_accel_max(),  // vertical accel (not used)
+                                             _pos_control.get_accel_max(),  // corner accel
                                              AR_WPNAV_SNAP_MAX,             // snap
                                              _pos_control.get_jerk_max());
 
@@ -404,13 +409,13 @@ void AR_WPNav::advance_wp_target_along_track(const Location &current_loc, float 
     // exit immediately if no current location, destination or disarmed
     Vector2f curr_pos_NE;
     Vector3f curr_vel_NED;
-    if (!AP::ahrs().get_relative_position_NE_origin(curr_pos_NE) || !AP::ahrs().get_velocity_NED(curr_vel_NED)) {
+    if (!AP::ahrs().get_relative_position_NE_origin_float(curr_pos_NE) || !AP::ahrs().get_velocity_NED(curr_vel_NED)) {
         return;
     }
 
     // exit immediately if we can't convert waypoint origin to offset from ekf origin
     Vector2f origin_NE;
-    if (!_origin.get_vector_xy_from_origin_NE(origin_NE)) {
+    if (!_origin.get_vector_xy_from_origin_NE_cm(origin_NE)) {
         return;
     }
     // convert from cm to meters
@@ -425,7 +430,7 @@ void AR_WPNav::advance_wp_target_along_track(const Location &current_loc, float 
         float track_velocity = curr_vel_NED.xy().dot(track_direction);
         // set time scaler to be consistent with the achievable vehicle speed with a 5% buffer for short term variation.
         const float time_scaler_dt_max = _overspeed_enabled ? AR_WPNAV_OVERSPEED_RATIO_MAX : 1.0f;
-        track_scaler_dt = constrain_float(0.05f + (track_velocity - _pos_control.get_pos_p().kP() * track_error) / curr_target_vel.length(), 0.1f, time_scaler_dt_max);
+        track_scaler_dt = constrain_float(0.05f + (track_velocity - _pos_control.get_pos_p().kP() * track_error) / curr_target_vel.length(), 0.0f, time_scaler_dt_max);
     }
     // change s-curve time speed with a time constant of maximum acceleration / maximum jerk
     float track_scaler_tc = 1.0f;
@@ -435,16 +440,16 @@ void AR_WPNav::advance_wp_target_along_track(const Location &current_loc, float 
     _track_scalar_dt += (track_scaler_dt - _track_scalar_dt) * (dt / track_scaler_tc);
 
     // target position, velocity and acceleration from straight line or spline calculators
-    Vector3f target_pos_3d_ftype{origin_NE.x, origin_NE.y, 0.0f};
+    Vector3p target_pos_3d{origin_NE.x, origin_NE.y, 0.0f};
     Vector3f target_vel, target_accel;
 
     // update target position, velocity and acceleration
     const float wp_radius = MAX(_radius, _turn_radius);
-    bool s_finished = _scurve_this_leg.advance_target_along_track(_scurve_prev_leg, _scurve_next_leg, wp_radius, _pos_control.get_lat_accel_max(), _fast_waypoint, _track_scalar_dt * dt, target_pos_3d_ftype, target_vel, target_accel);
+    bool s_finished = _scurve_this_leg.advance_target_along_track(_scurve_prev_leg, _scurve_next_leg, wp_radius, _pos_control.get_lat_accel_max(), _fast_waypoint, _track_scalar_dt * dt, target_pos_3d, target_vel, target_accel);
 
     // pass new target to the position controller
     init_pos_control_if_necessary();
-    Vector2p target_pos_ptype{target_pos_3d_ftype.x, target_pos_3d_ftype.y};
+    Vector2p target_pos_ptype{target_pos_3d.x, target_pos_3d.y};
     _pos_control.set_pos_vel_accel_target(target_pos_ptype, target_vel.xy(), target_accel.xy());
 
     // check if we've reached the waypoint
@@ -466,7 +471,7 @@ void AR_WPNav::update_psc_input_shaping(float dt)
 {
     // convert destination location to offset from EKF origin (in meters)
     Vector2f pos_target_cm;
-    if (!_destination.get_vector_xy_from_origin_NE(pos_target_cm)) {
+    if (!_destination.get_vector_xy_from_origin_NE_cm(pos_target_cm)) {
         return;
     }
 
@@ -486,7 +491,7 @@ void AR_WPNav::update_psc_input_shaping(float dt)
     }
 }
 
-// update distance from vehicle's current position to destination
+// update straight-line distance and bearing from vehicle's current position to destination
 void AR_WPNav::update_distance_and_bearing_to_destination()
 {
     // if no current location leave distance unchanged
@@ -505,6 +510,10 @@ void AR_WPNav::update_steering_and_speed(const Location &current_loc, float dt)
 {
     _cross_track_error = calc_crosstrack_error(current_loc);
 
+    // update position controller
+    _pos_control.set_reversed(_reversed);
+    _pos_control.update(dt);
+
     // handle pivot turns
     if (_pivot.active()) {
         // decelerate to zero
@@ -512,14 +521,11 @@ void AR_WPNav::update_steering_and_speed(const Location &current_loc, float dt)
         _desired_heading_cd = _reversed ? wrap_360_cd(oa_wp_bearing_cd() + 18000) : oa_wp_bearing_cd();
         _desired_turn_rate_rads = is_zero(_desired_speed_limited) ? _pivot.get_turn_rate_rads(_desired_heading_cd * 0.01, dt) : 0;
         _desired_lat_accel = 0.0f;
-        return;
+    } else {
+        _desired_speed_limited = _pos_control.get_desired_speed();
+        _desired_turn_rate_rads = _pos_control.get_desired_turn_rate_rads();
+        _desired_lat_accel = _pos_control.get_desired_lat_accel();
     }
-
-    _pos_control.set_reversed(_reversed);
-    _pos_control.update(dt);
-    _desired_speed_limited = _pos_control.get_desired_speed();
-    _desired_turn_rate_rads = _pos_control.get_desired_turn_rate_rads();
-    _desired_lat_accel = _pos_control.get_desired_lat_accel();
 }
 
 // settor to allow vehicle code to provide turn related param values to this library (should be updated regularly)
@@ -530,6 +536,7 @@ void AR_WPNav::set_turn_params(float turn_radius, bool pivot_possible)
 }
 
 // calculate the crosstrack error
+// value is negative when the vehicle is on the path's left side
 float AR_WPNav::calc_crosstrack_error(const Location& current_loc) const
 {
     if (!_orig_and_dest_valid) {

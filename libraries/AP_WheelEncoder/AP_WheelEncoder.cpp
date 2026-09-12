@@ -26,6 +26,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: WheelEncoder type
     // @Description: What type of WheelEncoder is connected
     // @Values: 0:None,1:Quadrature,10:SITL Quadrature
+    // @RebootRequired: True
     // @User: Standard
     AP_GROUPINFO_FLAGS("_TYPE", 0, AP_WheelEncoder, _type[0], 0, AP_PARAM_FLAG_ENABLE),
 
@@ -73,6 +74,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: Input Pin A
     // @Description: Input Pin A
     // @Values: -1:Disabled,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6
+    // @Range: -1 127
     // @User: Standard
     AP_GROUPINFO("_PINA",    4, AP_WheelEncoder, _pina[0], -1),
 
@@ -80,6 +82,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: Input Pin B
     // @Description: Input Pin B
     // @Values: -1:Disabled,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6
+    // @Range: -1 127
     // @User: Standard
     AP_GROUPINFO("_PINB",    5, AP_WheelEncoder, _pinb[0], -1),
 
@@ -88,6 +91,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: Second WheelEncoder type
     // @Description: What type of WheelEncoder sensor is connected
     // @Values: 0:None,1:Quadrature,10:SITL Quadrature
+    // @RebootRequired: True
     // @User: Standard
     AP_GROUPINFO("2_TYPE",   6, AP_WheelEncoder, _type[1], 0),
 
@@ -135,6 +139,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: Second Encoder Input Pin A
     // @Description: Second Encoder Input Pin A
     // @Values: -1:Disabled,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6
+    // @Range: -1 127
     // @User: Standard
     AP_GROUPINFO("2_PINA",   10, AP_WheelEncoder, _pina[1], 53),
 
@@ -142,6 +147,7 @@ const AP_Param::GroupInfo AP_WheelEncoder::var_info[] = {
     // @DisplayName: Second Encoder Input Pin B
     // @Description: Second Encoder Input Pin B
     // @Values: -1:Disabled,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6
+    // @Range: -1 127
     // @User: Standard
     AP_GROUPINFO("2_PINB",   11, AP_WheelEncoder, _pinb[1], 52),
 #endif
@@ -168,13 +174,13 @@ void AP_WheelEncoder::init(void)
 
         case WheelEncoder_TYPE_QUADRATURE:
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
-            drivers[i] = new AP_WheelEncoder_Quadrature(*this, i, state[i]);
+            drivers[i] = NEW_NOTHROW AP_WheelEncoder_Quadrature(*this, i, state[i]);
 #endif
             break;
 
         case WheelEncoder_TYPE_SITL_QUADRATURE:
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-            drivers[i] = new AP_WheelEncoder_SITL_Quadrature(*this, i, state[i]);
+            drivers[i] = NEW_NOTHROW AP_WheelEncoder_SITL_Quadrature(*this, i, state[i]);
 #endif
             break;
             
@@ -201,6 +207,7 @@ void AP_WheelEncoder::update(void)
     }
 }
 
+#if HAL_LOGGING_ENABLED
 // log wheel encoder information
 void AP_WheelEncoder::Log_Write() const
 {
@@ -219,6 +226,7 @@ void AP_WheelEncoder::Log_Write() const
     };
     AP::logger().WriteBlock(&pkt, sizeof(pkt));
 }
+#endif
 
 // check if an instance is healthy
 bool AP_WheelEncoder::healthy(uint8_t instance) const

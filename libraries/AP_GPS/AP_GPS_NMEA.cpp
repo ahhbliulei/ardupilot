@@ -271,6 +271,11 @@ bool AP_GPS_NMEA::_have_new_message()
         if (_last_AGRICA_ms != 0) {
             // we have lost AGRICA
             state.have_gps_yaw = false;
+#if AP_GPS_MB_YAW_OFFSET_ENABLED
+            // the moving baseline offset must not outlive the yaw solution it
+            // was calculated for
+            state.mb_yaw_offset.zero();
+#endif
             state.have_vertical_velocity = false;
             state.have_speed_accuracy = false;
             state.have_horizontal_accuracy = false;
@@ -313,7 +318,7 @@ bool AP_GPS_NMEA::_term_complete()
                     state.ground_speed     = _new_speed*0.01f;
                     state.ground_course    = wrap_360(_new_course*0.01f);
                 }
-                if (state.status >= AP_GPS::GPS_OK_FIX_3D) {
+                if (state.status >= AP_GPS_FixType::FIX_3D) {
                     make_gps_time(_new_date, _new_time * 10);
                     if (_last_AGRICA_ms != 0) {
                         state.time_week_ms = _last_itow_ms;
@@ -329,7 +334,7 @@ bool AP_GPS_NMEA::_term_complete()
             case _GPS_SENTENCE_GGA:
                 _last_GGA_ms = now;
                 if (_last_KSXT_pos_ms == 0 && _last_AGRICA_ms == 0) {
-                    state.location.alt  = _new_altitude;
+                    set_alt_amsl_cm(state, _new_altitude);
                     state.location.lat  = _new_latitude;
                     state.location.lng  = _new_longitude;
                 }
@@ -337,28 +342,28 @@ bool AP_GPS_NMEA::_term_complete()
                 state.hdop          = _new_hdop;
                 switch(_new_quality_indicator) {
                 case 0: // Fix not available or invalid
-                    state.status = AP_GPS::NO_FIX;
+                    state.status = AP_GPS_FixType::NONE;
                     break;
                 case 1: // GPS SPS Mode, fix valid
-                    state.status = AP_GPS::GPS_OK_FIX_3D;
+                    state.status = AP_GPS_FixType::FIX_3D;
                     break;
                 case 2: // Differential GPS, SPS Mode, fix valid
-                    state.status = AP_GPS::GPS_OK_FIX_3D_DGPS;
+                    state.status = AP_GPS_FixType::DGPS;
                     break;
                 case 3: // GPS PPS Mode, fix valid
-                    state.status = AP_GPS::GPS_OK_FIX_3D;
+                    state.status = AP_GPS_FixType::FIX_3D;
                     break;
                 case 4: // Real Time Kinematic. System used in RTK mode with fixed integers
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+                    state.status = AP_GPS_FixType::RTK_FIXED;
                     break;
                 case 5: // Float RTK. Satellite system used in RTK mode, floating integers
-                    state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT;
+                    state.status = AP_GPS_FixType::RTK_FLOAT;
                     break;
                 case 6: // Estimated (dead reckoning) Mode
-                    state.status = AP_GPS::NO_FIX;
+                    state.status = AP_GPS_FixType::NONE;
                     break;
                 default://to maintain compatibility with MAV_GPS_INPUT and others
-                    state.status = AP_GPS::GPS_OK_FIX_3D;
+                    state.status = AP_GPS_FixType::FIX_3D;
                     break;
                 }
                 break;
@@ -389,6 +394,12 @@ bool AP_GPS_NMEA::_term_complete()
                 state.gps_yaw = wrap_360(_new_gps_yaw*0.01f);
                 state.have_gps_yaw = true;
                 state.gps_yaw_time_ms = now;
+#if AP_GPS_MB_YAW_OFFSET_ENABLED
+                // this yaw is the device-reported heading, not one calculated
+                // from a moving baseline offset; clear any stale offset so no
+                // attitude correction is applied to it
+                state.mb_yaw_offset.zero();
+#endif
                 // remember that we are setup to provide yaw. With
                 // a NMEA GPS we can only tell if the GPS is
                 // configured to provide yaw when it first sends a
@@ -426,7 +437,7 @@ bool AP_GPS_NMEA::_term_complete()
                 }
                 state.location.lat     = _ksxt.fields[2]*1.0e7;
                 state.location.lng     = _ksxt.fields[1]*1.0e7;
-                state.location.alt     = _ksxt.fields[3]*1.0e2;
+                set_alt_amsl_cm(state, _ksxt.fields[3]*1.0e2);
                 _last_KSXT_pos_ms = now;
                 if (_ksxt.fields[9] >= 1) {
                     // we have 3D fix
@@ -447,6 +458,12 @@ bool AP_GPS_NMEA::_term_complete()
                     state.have_gps_yaw = true;
                     state.gps_yaw_time_ms = now;
                     state.gps_yaw_configured = true;
+#if AP_GPS_MB_YAW_OFFSET_ENABLED
+                    // this yaw is the receiver's own heading, not one calculated
+                    // from the configured moving baseline offset; clear any stale
+                    // offset so no attitude correction is applied to it
+                    state.mb_yaw_offset.zero();
+#endif
                 }
                 break;
 #if AP_GPS_NMEA_UNICORE_ENABLED
@@ -458,8 +475,9 @@ bool AP_GPS_NMEA::_term_complete()
                 _last_3D_velocity_ms = now;
                 state.location.lat = ag.lat*1.0e7;
                 state.location.lng = ag.lng*1.0e7;
-                state.location.alt = ag.alt*1.0e2;
                 state.undulation   = -ag.undulation;
+                state.have_undulation = true;
+                set_alt_amsl_cm(state, ag.alt*1.0e2);
                 state.velocity = ag.vel_NED;
                 velocity_to_speed_course(state);
                 state.speed_accuracy = ag.vel_stddev.length();
@@ -469,7 +487,6 @@ bool AP_GPS_NMEA::_term_complete()
                 state.have_speed_accuracy = true;
                 state.have_horizontal_accuracy = true;
                 state.have_vertical_accuracy = true;
-                state.have_undulation = true;
                 check_new_itow(ag.itow, _sentence_length);
                 break;
             }
@@ -493,7 +510,7 @@ bool AP_GPS_NMEA::_term_complete()
                 }
                 const float dist = uh.baseline_length;
                 const float bearing = uh.heading;
-                const float alt_diff = dist*tanf(radians(-uh.pitch));
+                const float alt_diff = dist*sinf(radians(-uh.pitch));
                 state.relPosHeading = bearing;
                 state.relPosLength = dist;
                 state.relPosD = alt_diff;
@@ -629,7 +646,7 @@ bool AP_GPS_NMEA::_term_complete()
         //
         case _GPS_SENTENCE_RMC + 7: // Speed (GPRMC)
         case _GPS_SENTENCE_VTG + 5: // Speed (VTG)
-            _new_speed = (_parse_decimal_100(_term) * 514) / 1000;       // knots-> m/sec, approximiates * 0.514
+            _new_speed = (_parse_decimal_100(_term) * 514) / 1000;       // knots-> m/sec, approximates * 0.514
             break;
         case _GPS_SENTENCE_HDT + 1: // Course (HDT)
             _new_gps_yaw = _parse_decimal_100(_term);
@@ -704,14 +721,14 @@ void AP_GPS_NMEA::parse_agrica_field(uint16_t term_number, const char *term)
         ag.heading_status = atol(term);
         break;
     case 25 ... 26:
-        ag.vel_NED[term_number-25] = atof(term);
+        ag.vel_NED[term_number-25] = strtof(term, nullptr);
         break;
     case 27:
         // AGRIC gives velocity up
-        ag.vel_NED.z = -atof(term);
+        ag.vel_NED.z = -strtof(term, nullptr);
         break;
     case 28 ... 30:
-        ag.vel_stddev[term_number-28] = atof(term);
+        ag.vel_stddev[term_number-28] = strtof(term, nullptr);
         break;
     case 31:
         ag.lat = atof(term);
@@ -720,16 +737,16 @@ void AP_GPS_NMEA::parse_agrica_field(uint16_t term_number, const char *term)
         ag.lng = atof(term);
         break;
     case 33:
-        ag.alt = atof(term);
+        ag.alt = strtof(term, nullptr);
         break;
     case 49:
         ag.itow = atol(term);
         break;
     case 37 ... 39:
-        ag.pos_stddev[term_number-37] = atof(term);
+        ag.pos_stddev[term_number-37] = strtof(term, nullptr);
         break;
     case 52:
-        ag.undulation = atof(term);
+        ag.undulation = strtof(term, nullptr);
         break;
     }
 }
@@ -754,16 +771,16 @@ void AP_GPS_NMEA::parse_uniheadinga_field(uint16_t term_number, const char *term
     auto &uh = _uniheadinga;
     switch (term_number) {
     case 4:
-        uh.baseline_length = atof(term);
+        uh.baseline_length = strtof(term, nullptr);
         break;
     case 5:
-        uh.heading = atof(term);
+        uh.heading = strtof(term, nullptr);
         break;
     case 6:
-        uh.pitch = atof(term);
+        uh.pitch = strtof(term, nullptr);
         break;
     case 8:
-        uh.heading_sd = atof(term);
+        uh.heading_sd = strtof(term, nullptr);
         break;
     }
 }
@@ -850,7 +867,7 @@ void AP_GPS_NMEA::send_config(void)
         return;
     }
     last_config_ms = now_ms;
-    const uint16_t rate_ms = gps._rate_ms[state.instance];
+    const uint16_t rate_ms = params.rate_ms;
 #if AP_GPS_NMEA_UNICORE_ENABLED
     const float rate_s = rate_ms * 0.001;
 #endif
@@ -957,9 +974,9 @@ bool AP_GPS_NMEA::get_lag(float &lag_sec) const
     return true;
 }
 
+#if HAL_LOGGING_ENABLED
 void AP_GPS_NMEA::Write_AP_Logger_Log_Startup_messages() const
 {
-#if HAL_LOGGING_ENABLED
     AP_GPS_Backend::Write_AP_Logger_Log_Startup_messages();
 #if AP_GPS_NMEA_UNICORE_ENABLED
     if (_have_unicore_versiona) {
@@ -970,7 +987,7 @@ void AP_GPS_NMEA::Write_AP_Logger_Log_Startup_messages() const
                                     _versiona.build_date);
     }
 #endif
-#endif
 }
+#endif
 
 #endif // AP_GPS_NMEA_ENABLED

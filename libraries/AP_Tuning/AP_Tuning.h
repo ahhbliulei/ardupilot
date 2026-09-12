@@ -1,5 +1,9 @@
 #pragma once
 
+#include "AP_Tuning_config.h"
+
+#if AP_TUNING_ENABLED
+
 #include <AP_Param/AP_Param.h>
 
 #include "stdint.h"
@@ -35,7 +39,7 @@ public:
     void check_input(uint8_t flightmode);
 
     // base parameter number for tuning sets of parameters in one flight
-    const uint8_t set_base = 100;
+    static constexpr uint8_t set_base = 100;
     
 private:
     AP_Int8 channel;
@@ -60,6 +64,9 @@ private:
 
     uint32_t last_check_ms;
 
+    // last tuning value scaled
+    float old_value;
+    
     void Log_Write_Parameter_Tuning(float value);
     
     // the parameter we are tuning
@@ -72,7 +79,7 @@ private:
     uint8_t current_set;
 
     // true if tune has changed
-    bool changed:1;
+    bool changed;
 
     // mask of params in set that need reverting
     uint32_t need_revert;
@@ -100,3 +107,5 @@ protected:
     // parmset is in vehicle subclass var table
     AP_Int16 parmset;
 };
+
+#endif  // AP_TUNING_ENABLED

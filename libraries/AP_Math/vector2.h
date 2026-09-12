@@ -32,6 +32,9 @@
 #ifndef MATH_CHECK_INDEXES
 #define MATH_CHECK_INDEXES 0
 #endif
+#if MATH_CHECK_INDEXES
+#include <assert.h>
+#endif
 
 #include <cmath>
 #include <float.h>
@@ -44,12 +47,12 @@ struct Vector2
     T x, y;
 
     // trivial ctor
-    constexpr Vector2<T>()
+    constexpr Vector2()
         : x(0)
         , y(0) {}
 
     // setting ctor
-    constexpr Vector2<T>(const T x0, const T y0)
+    constexpr Vector2(const T x0, const T y0)
         : x(x0)
         , y(y0) {}
 
@@ -101,7 +104,7 @@ struct Vector2
     // returns 0 if the vectors are parallel, and M_PI if they are antiparallel
     T angle(const Vector2<T> &v2) const;
 
-    // computes the angle of this vector in radians, from 0 to 2pi,
+    // computes the angle of this vector in radians, from -M_PI to M_PI,
     // from a unit vector(1,0); a (1,1) vector's angle is +M_PI/4
     T angle(void) const;
 
@@ -247,6 +250,10 @@ struct Vector2
         const T expected_run = seg_end.x-seg_start.x;
         const T intersection_run = point.x-seg_start.x;
         // check slopes are identical:
+#if CONFIG_HAL_BOARD == HAL_BOARD_QURT
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wabsolute-value"
+#endif
         if (::is_zero(expected_run)) {
             if (fabsF(intersection_run) > FLT_EPSILON) {
                 return false;
@@ -258,6 +265,9 @@ struct Vector2
                 return false;
             }
         }
+#if CONFIG_HAL_BOARD == HAL_BOARD_QURT
+#pragma clang diagnostic pop
+#endif
         // check for presence in bounding box
         if (seg_start.x < seg_end.x) {
             if (point.x < seg_start.x || point.x > seg_end.x) {

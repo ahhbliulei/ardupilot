@@ -8,7 +8,8 @@ const AP_Param::GroupInfo AP_Camera_Params::var_info[] = {
     // @Param: _TYPE
     // @DisplayName: Camera shutter (trigger) type
     // @Description: how to trigger the camera to take a picture
-    // @Values: 0:None, 1:Servo, 2:Relay, 3:GoPro in Solo Gimbal, 4:Mount (Siyi), 5:MAVLink, 6:MAVLinkCamV2, 7:Scripting
+    // @Values: 0:None, 1:Servo, 2:Relay, 3:GoPro in Solo Gimbal, 4:Mount (Siyi/Topotek/Viewpro/Xacti), 5:MAVLink, 6:MAVLinkCamV2 (Gremsy/AVT), 7:Scripting, 8:RunCam
+    // @RebootRequired: True
     // @User: Standard
     AP_GROUPINFO_FLAGS("_TYPE",  1, AP_Camera_Params, type, 0, AP_PARAM_FLAG_ENABLE),
 
@@ -63,6 +64,7 @@ const AP_Param::GroupInfo AP_Camera_Params::var_info[] = {
     // @DisplayName: Camera feedback pin
     // @Description: pin number to use for save accurate camera feedback messages. If set to -1 then don't use a pin flag for this, otherwise this is a pin number which if held high after a picture trigger order, will save camera messages when camera really takes a picture. A universal camera hot shoe is needed. The pin should be held high for at least 2 milliseconds for reliable trigger detection.  Some common values are given, but see the Wiki's "GPIOs" page for how to determine the pin number for a given autopilot. See also the CAMx_FEEDBCK_POL option.
     // @Values: -1:Disabled,50:AUX1,51:AUX2,52:AUX3,53:AUX4,54:AUX5,55:AUX6
+    // @Range: -1 127
     // @User: Standard
     // @RebootRequired: True
     AP_GROUPINFO("_FEEDBAK_PIN", 8, AP_Camera_Params, feedback_pin, -1),
@@ -77,9 +79,31 @@ const AP_Param::GroupInfo AP_Camera_Params::var_info[] = {
     // @Param: _OPTIONS
     // @DisplayName: Camera options
     // @Description: Camera options bitmask
-    // @Bitmask: 0:None,1: Recording Starts at arming and stops at disarming
+    // @Bitmask: 0:Recording Starts at arming and stops at disarming
     // @User: Standard
     AP_GROUPINFO("_OPTIONS", 10, AP_Camera_Params, options, 0),
+
+    // @Param: _MNT_INST
+    // @DisplayName: Camera Mount instance
+    // @Description: Mount instance camera is associated with. 0 means camera and mount have identical instance numbers e.g. camera1 and mount1
+    // @User: Standard
+    AP_GROUPINFO("_MNT_INST", 11, AP_Camera_Params, mount_instance, 0),
+
+    // @Param: _HFOV
+    // @DisplayName: Camera horizontal field of view
+    // @Description: Camera horizontal field of view. 0 if unknown
+    // @Units: deg
+    // @Range: 0 360
+    // @User: Standard
+    AP_GROUPINFO("_HFOV", 12, AP_Camera_Params, hfov, 0),
+
+    // @Param: _VFOV
+    // @DisplayName: Camera vertical field of view
+    // @Description: Camera vertical field of view. 0 if unknown
+    // @Units: deg
+    // @Range: 0 180
+    // @User: Standard
+    AP_GROUPINFO("_VFOV", 13, AP_Camera_Params, vfov, 0),
 
     AP_GROUPEND
 

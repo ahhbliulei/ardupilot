@@ -11,9 +11,9 @@ extern const AP_HAL::HAL& hal;
   constructor - registers instance at top Baro driver
  */
 AP_Baro_SITL::AP_Baro_SITL(AP_Baro &baro) :
+    AP_Baro_Backend(baro),
     _sitl(AP::sitl()),
-    _has_sample(false),
-    AP_Baro_Backend(baro)
+    _has_sample(false)
 {
     if (_sitl != nullptr) {
         _instance = _frontend.register_sensor();
@@ -66,7 +66,21 @@ void AP_Baro_SITL::_timer()
         return;
     }
 
-    sim_alt += _sitl->baro[_instance].drift * now * 0.001f;
+    // ground effect: downwash raises static pressure so the baro under-reads altitude,
+    // decaying to zero at 2m AGL; only applied while the motors are running
+    const float geff = _sitl->baro[_instance].ground_effect_alt_err;
+    if (is_positive(geff) && is_positive(_sitl->throttle)) {
+        const float h_agl_m = MAX(_sitl->state.height_agl, 0.0f);
+        const float decay_scale_m = 2.0f;
+        const float scale = MAX(0.0f, 1.0f - h_agl_m / decay_scale_m);
+        sim_alt -= geff * scale;
+    }
+
+    const auto drift_delta_t_ms = now - last_drift_delta_t_ms;
+    last_drift_delta_t_ms = now;
+    total_alt_drift += _sitl->baro[_instance].drift * drift_delta_t_ms * 0.001f;
+
+    sim_alt += total_alt_drift;
     sim_alt += _sitl->baro[_instance].noise * rand_float();
 
     // add baro glitch
@@ -114,12 +128,9 @@ void AP_Baro_SITL::_timer()
     }
 
 #if !APM_BUILD_TYPE(APM_BUILD_ArduSub)
-    float sigma, delta, theta;
-
-    AP_Baro::SimpleAtmosphere(sim_alt * 0.001f, sigma, delta, theta);
-    float p = SSL_AIR_PRESSURE * delta;
-    float T = KELVIN_TO_C(SSL_AIR_TEMPERATURE * theta);
-
+    float p, T_K;
+    AP_Baro::get_pressure_temperature_for_alt_amsl(sim_alt, p, T_K);
+    float T = KELVIN_TO_C(T_K);
     temperature_adjustment(p, T);
 #else
     float rho, delta, theta;
@@ -139,7 +150,7 @@ void AP_Baro_SITL::_timer()
 // unhealthy if baro is turned off or beyond supported instances
 bool AP_Baro_SITL::healthy(uint8_t instance) 
 {
-    return !_sitl->baro[instance].disable;
+    return _last_sample_time != 0 && !_sitl->baro[instance].disable;
 }
 
 // Read the sensor
@@ -185,7 +196,10 @@ float AP_Baro_SITL::wind_pressure_correction(uint8_t instance)
         error += bp.wcof_zn * sqz;
     }
 
-    return error * 0.5 * SSL_AIR_DENSITY * AP::baro().get_air_density_ratio();
+    // use the air density at the simulated vehicle's true altitude;
+    // the vehicle's own estimates must play no part in simulating
+    // the physical pressure error:
+    return error * 0.5 * AP_Baro::get_air_density_for_alt_amsl(AP::sitl()->state.altitude);
 }
 
 #endif  // AP_SIM_BARO_ENABLED

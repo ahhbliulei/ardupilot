@@ -27,10 +27,6 @@
 
 extern const AP_HAL::HAL& hal;
 
-void AP_AHRS_Backend::init()
-{
-}
-
 // return a smoothed and corrected gyro vector using the latest ins data (which may not have been consumed by the EKF yet)
 Vector3f AP_AHRS::get_gyro_latest(void) const
 {
@@ -42,9 +38,9 @@ Vector3f AP_AHRS::get_gyro_latest(void) const
 void AP_AHRS::set_trim(const Vector3f &new_trim)
 {
     const Vector3f trim {
-        constrain_float(new_trim.x, ToRad(-AP_AHRS_TRIM_LIMIT), ToRad(AP_AHRS_TRIM_LIMIT)),
-        constrain_float(new_trim.y, ToRad(-AP_AHRS_TRIM_LIMIT), ToRad(AP_AHRS_TRIM_LIMIT)),
-        constrain_float(new_trim.z, ToRad(-AP_AHRS_TRIM_LIMIT), ToRad(AP_AHRS_TRIM_LIMIT))
+        constrain_float(new_trim.x, radians(-AP_AHRS_TRIM_LIMIT), radians(AP_AHRS_TRIM_LIMIT)),
+        constrain_float(new_trim.y, radians(-AP_AHRS_TRIM_LIMIT), radians(AP_AHRS_TRIM_LIMIT)),
+        constrain_float(new_trim.z, radians(-AP_AHRS_TRIM_LIMIT), radians(AP_AHRS_TRIM_LIMIT))
     };
     _trim.set_and_save(trim);
 }
@@ -55,8 +51,8 @@ void AP_AHRS::add_trim(float roll_in_radians, float pitch_in_radians, bool save_
     Vector3f trim = _trim.get();
 
     // add new trim
-    trim.x = constrain_float(trim.x + roll_in_radians, ToRad(-AP_AHRS_TRIM_LIMIT), ToRad(AP_AHRS_TRIM_LIMIT));
-    trim.y = constrain_float(trim.y + pitch_in_radians, ToRad(-AP_AHRS_TRIM_LIMIT), ToRad(AP_AHRS_TRIM_LIMIT));
+    trim.x = constrain_float(trim.x + roll_in_radians, radians(-AP_AHRS_TRIM_LIMIT), radians(AP_AHRS_TRIM_LIMIT));
+    trim.y = constrain_float(trim.y + pitch_in_radians, radians(-AP_AHRS_TRIM_LIMIT), radians(AP_AHRS_TRIM_LIMIT));
 
     // set new trim values
     _trim.set(trim);
@@ -71,7 +67,8 @@ void AP_AHRS::add_trim(float roll_in_radians, float pitch_in_radians, bool save_
 void AP_AHRS::update_orientation()
 {
     const uint32_t now_ms = AP_HAL::millis();
-    if (now_ms - last_orientation_update_ms < 1000) {
+    if (last_orientation_update_ms != 0 &&
+        now_ms - last_orientation_update_ms < 1000) {
         // only update once/second
         return;
     }
@@ -88,74 +85,6 @@ void AP_AHRS::update_orientation()
 
     AP::ins().set_board_orientation(orientation);
     AP::compass().set_board_orientation(orientation);
-}
-
-// return a ground speed estimate in m/s
-Vector2f AP_AHRS_DCM::groundspeed_vector(void)
-{
-    // Generate estimate of ground speed vector using air data system
-    Vector2f gndVelADS;
-    Vector2f gndVelGPS;
-    float airspeed = 0;
-    const bool gotAirspeed = airspeed_estimate_true(airspeed);
-    const bool gotGPS = (AP::gps().status() >= AP_GPS::GPS_OK_FIX_2D);
-    if (gotAirspeed) {
-        const Vector2f airspeed_vector{_cos_yaw * airspeed, _sin_yaw * airspeed};
-        Vector3f wind;
-        UNUSED_RESULT(wind_estimate(wind));
-        gndVelADS = airspeed_vector + wind.xy();
-    }
-
-    // Generate estimate of ground speed vector using GPS
-    if (gotGPS) {
-        const float cog = radians(AP::gps().ground_course());
-        gndVelGPS = Vector2f(cosf(cog), sinf(cog)) * AP::gps().ground_speed();
-    }
-    // If both ADS and GPS data is available, apply a complementary filter
-    if (gotAirspeed && gotGPS) {
-        // The LPF is applied to the GPS and the HPF is applied to the air data estimate
-        // before the two are summed
-        //Define filter coefficients
-        // alpha and beta must sum to one
-        // beta = dt/Tau, where
-        // dt = filter time step (0.1 sec if called by nav loop)
-        // Tau = cross-over time constant (nominal 2 seconds)
-        // More lag on GPS requires Tau to be bigger, less lag allows it to be smaller
-        // To-Do - set Tau as a function of GPS lag.
-        const float alpha = 1.0f - beta;
-        // Run LP filters
-        _lp = gndVelGPS * beta  + _lp * alpha;
-        // Run HP filters
-        _hp = (gndVelADS - _lastGndVelADS) + _hp * alpha;
-        // Save the current ADS ground vector for the next time step
-        _lastGndVelADS = gndVelADS;
-        // Sum the HP and LP filter outputs
-        return _hp + _lp;
-    }
-    // Only ADS data is available return ADS estimate
-    if (gotAirspeed && !gotGPS) {
-        return gndVelADS;
-    }
-    // Only GPS data is available so return GPS estimate
-    if (!gotAirspeed && gotGPS) {
-        return gndVelGPS;
-    }
-
-    if (airspeed > 0) {
-        // we have a rough airspeed, and we have a yaw. For
-        // dead-reckoning purposes we can create a estimated
-        // groundspeed vector
-        Vector2f ret{_cos_yaw, _sin_yaw};
-        ret *= airspeed;
-        // adjust for estimated wind
-        Vector3f wind;
-        UNUSED_RESULT(wind_estimate(wind));
-        ret.x += wind.x;
-        ret.y += wind.y;
-        return ret;
-    }
-
-    return Vector2f(0.0f, 0.0f);
 }
 
 /*
@@ -224,6 +153,10 @@ void AP_AHRS::update_cd_values(void)
     yaw_sensor   = degrees(yaw) * 100;
     if (yaw_sensor < 0)
         yaw_sensor += 36000;
+
+    rpy_deg[0] = degrees(roll);
+    rpy_deg[1] = degrees(pitch);
+    rpy_deg[2] = wrap_360(degrees(yaw));  // we are probably already in trouble if this is required
 }
 
 /*
@@ -235,7 +168,7 @@ AP_AHRS_View *AP_AHRS::create_view(enum Rotation rotation, float pitch_trim_deg)
         // can only have one
         return nullptr;
     }
-    _view = new AP_AHRS_View(*this, rotation, pitch_trim_deg);
+    _view = NEW_NOTHROW AP_AHRS_View(*this, rotation, pitch_trim_deg);
     return _view;
 }
 
@@ -269,7 +202,9 @@ void AP_AHRS::update_AOA_SSA(void)
         return;
     }
 
-    aoa_wind = wind_estimate();
+    // use the wind estimate even if it is not marked valid; a zero or
+    // stale wind vector simply degrades the AOA/SSA estimate
+    IGNORE_RETURN(get_wind(aoa_wind));
 
     // Rotate vectors to the body frame and calculate velocity and wind
     const Matrix3f &rot = get_rotation_body_to_ned();
@@ -305,13 +240,21 @@ Vector2f AP_AHRS::earth_to_body2D(const Vector2f &ef) const
                     -ef.x * _sin_yaw + ef.y * _cos_yaw);
 }
 
-// rotate a 2D vector from earth frame to body frame
+// rotate a 2D vector from body frame to earth frame
 Vector2f AP_AHRS::body_to_earth2D(const Vector2f &bf) const
 {
     return Vector2f(bf.x * _cos_yaw - bf.y * _sin_yaw,
                     bf.x * _sin_yaw + bf.y * _cos_yaw);
 }
 
+// rotate a 2D vector from body frame to earth frame
+Vector2p AP_AHRS::body_to_earth2D_p(const Vector2p &bf) const
+{
+    return Vector2p(bf.x * _cos_yaw - bf.y * _sin_yaw,
+                    bf.x * _sin_yaw + bf.y * _cos_yaw);
+}
+
+#if HAL_LOGGING_ENABLED
 // log ahrs home and EKF origin
 void AP_AHRS::Log_Write_Home_And_Origin()
 {
@@ -324,13 +267,14 @@ void AP_AHRS::Log_Write_Home_And_Origin()
         Write_Origin(LogOriginType::ekf_origin, ekf_orig);
     }
 
-    if (home_is_set()) {
+    if (_home_is_set) {
         Write_Origin(LogOriginType::ahrs_home, _home);
     }
 }
+#endif
 
 // get apparent to true airspeed ratio
-float AP_AHRS_Backend::get_EAS2TAS(void) const {
+float AP_AHRS_Backend::get_EAS2TAS(void) {
     return AP::baro().get_EAS2TAS();
 }
 

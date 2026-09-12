@@ -6,18 +6,32 @@
 // CIRCLE_INCLUSION_INT stores the radius an a 32-bit integer in
 // metres.  This was a bug, and CIRCLE_INCLUSION was created to store
 // as a 32-bit float instead.  We save as _INT in the case that the
-// radius looks like an integer as a backwards-compatability measure.
+// radius looks like an integer as a backwards-compatibility measure.
 // For 4.2 we might consider only loading _INT and always saving as
 // float, and in 4.3 considering _INT invalid
-enum class AC_PolyFenceType {
+
+// CODE_REMOVAL
+// ArduPilot 4.7 no longer stores circle radiuses that look like
+//   integers as integer item types, so any time a fence is saved the
+//   use of the deprecated types is fixed.
+// ArduPilot 4.8 warns if it loads an integer item, warns user to re-upload the fence
+// ArduPilot 4.9 warns if it loads an integer item, warns user to re-upload the fence
+// ArduPilot 4.10 removes support for them
+
+enum class AC_PolyFenceType : uint8_t {
     END_OF_STORAGE        = 99,
     POLYGON_INCLUSION     = 98,
     POLYGON_EXCLUSION     = 97,
+#if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_EXCLUSION_INT  = 96,
+#endif  // AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     RETURN_POINT          = 95,
+#if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_INCLUSION_INT  = 94,
+#endif // #if AC_POLYFENCE_CIRCLE_INT_SUPPORT_ENABLED
     CIRCLE_EXCLUSION      = 93,
     CIRCLE_INCLUSION      = 92,
+    HOME_CIRCLE_INCLUSION = 91,
 };
 
 // a FenceItem is just a means of passing data about an item into
@@ -39,15 +53,14 @@ public:
 #include <AP_Common/Location.h>
 #include <GCS_MAVLink/GCS_MAVLink.h>
 
-#define AC_POLYFENCE_FENCE_POINT_PROTOCOL_SUPPORT 1
-
 class AC_PolyFence_loader
 {
 
 public:
 
-    AC_PolyFence_loader(AP_Int8 &total) :
-        _total(total) {}
+    AC_PolyFence_loader(AP_Int8 &total, const AP_Int16 &options) :
+        _total(total),
+        _options(options) {}
 
     /* Do not allow copies */
     CLASS_NO_COPY(AC_PolyFence_loader);
@@ -57,6 +70,7 @@ public:
     // methods primarily for MissionItemProtocol_Fence to use:
     // return the total number of points stored
     uint16_t num_stored_items() const { return _eeprom_item_count; }
+    // Read from the persistent storage into an item object
     bool get_item(const uint16_t seq, AC_PolyFenceItem &item) WARN_IF_UNUSED;
 
     ///
@@ -128,13 +142,17 @@ public:
     ///
     /// mavlink
     ///
-    /// handler for polygon fence messages with GCS
-    void handle_msg(class GCS_MAVLINK &link, const mavlink_message_t& msg);
-
     //  breached() - returns true if the vehicle has breached any fence
     bool breached() const WARN_IF_UNUSED;
+    //  returns true if location is outside the boundary also returns the minimum distance to the fence
+    bool breached(const Location& loc, float& distance_outside_fence, Vector2f& fence_direction) const WARN_IF_UNUSED;
     //  breached(Location&) - returns true if location is outside the boundary
-    bool breached(const Location& loc) const WARN_IF_UNUSED;
+    bool breached(const Location& loc) const WARN_IF_UNUSED
+    {
+        float distance_outside_fence;
+        Vector2f breach_direction;
+        return breached(loc, distance_outside_fence, breach_direction);
+    }
 
     // returns true if a polygonal include fence could be returned
     bool inclusion_boundary_available() const WARN_IF_UNUSED {
@@ -163,7 +181,7 @@ public:
     // load polygon points stored in eeprom into
     // _loaded_offsets_from_origin and perform validation.  returns
     // true if load successfully completed
-    bool load_from_eeprom() WARN_IF_UNUSED;
+    bool load_from_storage() WARN_IF_UNUSED;
 
     // allow threads to lock against AHRS update
     HAL_Semaphore &get_loaded_fence_semaphore(void) {
@@ -173,12 +191,10 @@ public:
     // call @10Hz to check for fence load being valid
     void update();
 
-#if AC_POLYFENCE_FENCE_POINT_PROTOCOL_SUPPORT
     // get_return_point - returns latitude/longitude of return point.
     // This works with storage - the returned vector is absolute
     // lat/lon.
     bool get_return_point(Vector2l &ret) WARN_IF_UNUSED;
-#endif
 
     // return total number of fences - polygons and circles
     uint16_t total_fence_count() const {
@@ -189,6 +205,11 @@ public:
     }
 
 
+#if AP_SDCARD_STORAGE_ENABLED
+    bool failed_sdcard_storage(void) const {
+        return _failed_sdcard_storage;
+    }
+#endif
 
 private:
     // multi-thread access support
@@ -306,6 +327,7 @@ private:
     // example.
     Vector2f *_loaded_offsets_from_origin;
     Vector2l *_loaded_points_lla;
+    Location loaded_origin; // origin at the time the boundary was loaded
 
     class ExclusionCircle {
     public:
@@ -320,8 +342,15 @@ private:
     class InclusionCircle {
     public:
         Vector2f pos_cm;    // vector offset from home in cm
-        Vector2l point;       // lat/lng of zone
+        Vector2l point;     // scaled lat/lng of zone; INT32_MAX signifies home-centered
         float radius;
+        bool is_home_centered() const WARN_IF_UNUSED {
+            return point.x == INT32_MAX && point.y == INT32_MAX;
+        }
+        void set_home_centered() {
+            point.x = INT32_MAX;
+            point.y = INT32_MAX;
+        }
     };
     InclusionCircle *_loaded_circle_inclusion_boundary;
 
@@ -341,7 +370,7 @@ private:
     // the result into pos_cm.
     bool scale_latlon_from_origin(const Location &origin,
                                   const Vector2l &point,
-                                  Vector2f &pos_cm) WARN_IF_UNUSED;
+                                  Vector2f &pos_cm) const WARN_IF_UNUSED;
    
     // read_polygon_from_storage - reads vertex_count
     // latitude/longitude points from offset in permanent storage,
@@ -353,39 +382,6 @@ private:
                                    Vector2f *&next_storage_point,
                                    Vector2l *&next_storage_point_lla) WARN_IF_UNUSED;
 
-    /*
-     * Upgrade functions - attempt to keep user's fences when
-     * upgrading to new firmware
-     */
-    // convert_to_new_storage - will attempt to change a pre-existing
-    // stored fence to the new storage format (so people don't lose
-    // their fences when upgrading)
-    bool convert_to_new_storage() WARN_IF_UNUSED;
-    // load boundary point from eeprom, returns true on successful load
-    bool load_point_from_eeprom(uint16_t i, Vector2l& point) const WARN_IF_UNUSED;
-
-
-#if AC_POLYFENCE_FENCE_POINT_PROTOCOL_SUPPORT
-    /*
-     * FENCE_POINT protocol compatability
-     */
-    void handle_msg_fetch_fence_point(GCS_MAVLINK &link, const mavlink_message_t& msg);
-    void handle_msg_fence_point(GCS_MAVLINK &link, const mavlink_message_t& msg);
-    // contains_compatible_fence - returns true if the permanent fence
-    // storage contains fences that are compatible with the old
-    // FENCE_POINT protocol.
-    bool contains_compatible_fence() const WARN_IF_UNUSED;
-
-    // get_or_create_include_fence - returns a point to an include
-    // fence to be used for the FENCE_POINT-supplied polygon.  May
-    // format the storage appropriately.
-    FenceIndex *get_or_create_include_fence();
-    // get_or_create_include_fence - returns a point to a return point
-    // to be used for the FENCE_POINT-supplied return point.  May
-    // format the storage appropriately.
-    FenceIndex *get_or_create_return_point();
-#endif
-
     // primitives to write parts of fencepoints out:
     bool write_type_to_storage(uint16_t &offset, AC_PolyFenceType type) WARN_IF_UNUSED;
     bool write_latlon_to_storage(uint16_t &offset, const Vector2l &latlon) WARN_IF_UNUSED;
@@ -395,8 +391,9 @@ private:
     bool write_eos_to_storage(uint16_t &offset);
 
     // _total - reference to FENCE_TOTAL parameter.  This is used
-    // solely for compatability with the FENCE_POINT protocol
+    // solely for compatibility with the FENCE_POINT protocol
     AP_Int8 &_total;
+    const AP_Int16 &_options;
     uint8_t _old_total;
 
 
@@ -437,6 +434,11 @@ private:
     bool index_eeprom() WARN_IF_UNUSED;
 
     uint16_t fence_storage_space_required(const AC_PolyFenceItem *new_items, uint16_t count);
+
+#if AP_SDCARD_STORAGE_ENABLED
+    // true if we failed to load SDCard storage on init
+    bool _failed_sdcard_storage;
+#endif
 };
 
 #endif // AP_FENCE_ENABLED

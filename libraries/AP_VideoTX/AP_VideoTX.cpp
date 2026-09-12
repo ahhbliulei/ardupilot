@@ -51,7 +51,7 @@ const AP_Param::GroupInfo AP_VideoTX::var_info[] = {
     // @DisplayName: Video Transmitter Band
     // @Description: Video Transmitter Band
     // @User: Standard
-    // @Values: 0:Band A,1:Band B,2:Band E,3:Airwave,4:RaceBand,5:Low RaceBand
+    // @Values: 0:Band A,1:Band B,2:Band E,3:Airwave,4:RaceBand,5:Low RaceBand,6:1G3 Band A,7:1G3 Band B,8:Band X,9:3G3 Band A,10:3G3 Band B
     AP_GROUPINFO("BAND",  4, AP_VideoTX, _band, 0),
 
     // @Param: FREQ
@@ -59,7 +59,7 @@ const AP_Param::GroupInfo AP_VideoTX::var_info[] = {
     // @Description: Video Transmitter Frequency. The frequency is derived from the setting of BAND and CHANNEL
     // @User: Standard
     // @ReadOnly: True
-    // @Range: 5000 6000
+    // @Range: 1000 6000
     AP_GROUPINFO("FREQ",  5, AP_VideoTX, _frequency_mhz, 0),
 
     // @Param: OPTIONS
@@ -75,6 +75,13 @@ const AP_Param::GroupInfo AP_VideoTX::var_info[] = {
     // @Range: 25 1000
     AP_GROUPINFO("MAX_POWER", 7, AP_VideoTX, _max_power_mw, 800),
 
+    // @Param: TYPES
+    // @DisplayName: Allowed VTX control transports
+    // @Description: Bitmask of the control transports permitted to manage the VTX. AP_VideoTX represents a single VTX, so when more than one transport is present (for example a CRSF VTX on the receiver and an MSP VTX on the goggles) this selects which one owns it. Clear a transport's bit to stop it taking control of the VTX.
+    // @Bitmask: 0:CRSF,1:SmartAudio,2:Tramp,3:MSP
+    // @User: Advanced
+    AP_GROUPINFO("TYPES", 8, AP_VideoTX, _types_allowed, uint8_t(CRSF | SmartAudio | Tramp | MSP)),
+
     AP_GROUPEND
 };
 
@@ -87,7 +94,7 @@ const AP_Param::GroupInfo AP_VideoTX::var_info[] = {
 
 extern const AP_HAL::HAL& hal;
 
-const char * AP_VideoTX::band_names[] = {"A","B","E","F","R","L"};
+const char * AP_VideoTX::band_names[] = {"A","B","E","F","R","L","1G3_A","1G3_B","X","3G3_A","3G3_B"};
 
 const uint16_t AP_VideoTX::VIDEO_CHANNELS[AP_VideoTX::MAX_BANDS][VTX_MAX_CHANNELS] =
 {
@@ -96,7 +103,12 @@ const uint16_t AP_VideoTX::VIDEO_CHANNELS[AP_VideoTX::MAX_BANDS][VTX_MAX_CHANNEL
     { 5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945}, /* Band E */
     { 5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880}, /* Airwave */
     { 5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917}, /* Race */
-    { 5621, 5584, 5547, 5510, 5473, 5436, 5399, 5362}  /* LO Race */
+    { 5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621}, /* LO Race */
+    { 1080, 1120, 1160, 1200, 1240, 1280, 1320, 1360}, /* Band 1G3_A */
+    { 1080, 1120, 1160, 1200, 1258, 1280, 1320, 1360}, /* Band 1G3_B */
+    { 4990, 5020, 5050, 5080, 5110, 5140, 5170, 5200}, /* Band X */
+    { 3330, 3350, 3370, 3390, 3410, 3430, 3450, 3470}, /* Band 3G3_A */
+    { 3170, 3190, 3210, 3230, 3250, 3270, 3290, 3310}  /* Band 3G3_B */
 };
 
 // mapping of power level to milliwatt to dbm
@@ -110,7 +122,7 @@ AP_VideoTX::PowerLevel AP_VideoTX::_power_levels[VTX_MAX_POWER_LEVELS] = {
     { 1,    200,  23, 16   },
     { 0x12, 400,  26, 0xFF }, // only in SA 2.1
     { 2,    500,  27, 25   },
-    //{ 0x13, 600,  28, 0xFF },
+    { 0x12, 600,  28, 0xFF }, // Tramp lies above power levels and always returns 25/100/200/400/600
     { 3,    800,  29, 40   },
     { 0x13, 1000, 30, 0xFF }, // only in SA 2.1
     { 0xFF, 0,    0,  0XFF, PowerActive::Inactive }  // slot reserved for a custom power level
@@ -137,9 +149,6 @@ bool AP_VideoTX::init(void)
     if (_initialized) {
         return false;
     }
-
-    // PARAMETER_CONVERSION - Added: Sept-2022
-    _options.convert_parameter_width(AP_PARAM_INT16);
 
     // find the index into the power table
     for (uint8_t i = 0; i < VTX_MAX_POWER_LEVELS; i++) {
@@ -245,7 +254,7 @@ uint8_t AP_VideoTX::update_power_dbm(uint8_t power, PowerActive active)
     _power_levels[VTX_MAX_POWER_LEVELS-1].dbm = power;
     _power_levels[VTX_MAX_POWER_LEVELS-1].level = 255;
     _power_levels[VTX_MAX_POWER_LEVELS-1].dac = 255;
-    _power_levels[VTX_MAX_POWER_LEVELS-1].mw = uint16_t(roundf(powf(10, power / 10.0f)));
+    _power_levels[VTX_MAX_POWER_LEVELS-1].mw = uint16_t(roundf(powf(10, power * 0.1f)));
     _power_levels[VTX_MAX_POWER_LEVELS-1].active = active;
     debug("non-standard power %ddbm -> %dmw", power, _power_levels[VTX_MAX_POWER_LEVELS-1].mw);
     return VTX_MAX_POWER_LEVELS-1;
@@ -265,15 +274,89 @@ void AP_VideoTX::update_all_power_dbm(uint8_t nlevels, const uint8_t power[])
     }
 }
 
+// mark the level matching the given mW as active, stashing a non-standard
+// value in the custom slot; does not change the currently selected power
+void AP_VideoTX::update_power_mw(uint16_t power_mw, PowerActive active)
+{
+    for (uint8_t i = 0; i < ARRAY_SIZE(_power_levels); i++) {
+        if (power_mw == _power_levels[i].mw) {
+            _power_levels[i].active = active;
+            return;
+        }
+    }
+    if (power_mw == 0) {
+        return;
+    }
+    // non-standard value: use the custom slot
+    PowerLevel &slot = _power_levels[ARRAY_SIZE(_power_levels) - 1];
+    slot.mw = power_mw;
+    slot.dbm = uint8_t(roundf(10.0f * log10f(float(power_mw))));
+    slot.level = 255;
+    slot.dac = 255;
+    slot.active = active;
+}
+
+// number of active power levels
+uint8_t AP_VideoTX::get_num_power_levels() const
+{
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < ARRAY_SIZE(_power_levels); i++) {
+        if (_power_levels[i].active == PowerActive::Active) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// mW for a one based index into the active levels (ascending), 0 if unknown
+uint16_t AP_VideoTX::get_power_mw_for_index(uint8_t index) const
+{
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < ARRAY_SIZE(_power_levels); i++) {
+        if (_power_levels[i].active == PowerActive::Active && ++count == index) {
+            return _power_levels[i].mw;
+        }
+    }
+    return 0;
+}
+
+// one based index into the active levels for a mW value, 0 if not matched
+uint8_t AP_VideoTX::get_power_index_for_mw(uint16_t power_mw) const
+{
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < ARRAY_SIZE(_power_levels); i++) {
+        if (_power_levels[i].active == PowerActive::Active) {
+            count++;
+            if (_power_levels[i].mw == power_mw) {
+                return count;
+            }
+        }
+    }
+    return 0;
+}
+
 // set the power in mw
 void AP_VideoTX::set_power_mw(uint16_t power)
 {
     for (uint8_t i = 0; i < VTX_MAX_POWER_LEVELS; i++) {
         if (power == _power_levels[i].mw) {
             _current_power = i;
-            break;
+            return;
         }
     }
+    // power 0 (pit mode) should always match the built-in 0mW entry; bail
+    // here so it can never reach log10f below
+    if (power == 0) {
+        return;
+    }
+    // non-standard value (e.g. Tramp 2500mW): stash it in the custom slot
+    PowerLevel &slot = _power_levels[VTX_MAX_POWER_LEVELS - 1];
+    slot.mw = power;
+    slot.dbm = uint8_t(roundf(10.0f * log10f(float(power))));
+    slot.level = 255;
+    slot.dac = 255;
+    slot.active = PowerActive::Active;
+    _current_power = VTX_MAX_POWER_LEVELS - 1;
 }
 
 // set the power "level"
@@ -339,13 +422,6 @@ void AP_VideoTX::update(void)
         return;
     }
 
-#if HAL_CRSF_TELEM_ENABLED
-    AP_CRSF_Telem* crsf = AP::crsf_telem();
-
-    if (crsf != nullptr) {
-        crsf->update();
-    }
-#endif
     // manipulate pitmode if pitmode-on-disarm or power-on-arm is set
     if (has_option(VideoOptions::VTX_PITMODE_ON_DISARM) || has_option(VideoOptions::VTX_PITMODE_UNTIL_ARM)) {
         if (hal.util->get_soft_armed() && has_option(VideoOptions::VTX_PITMODE)) {
@@ -403,6 +479,10 @@ bool AP_VideoTX::update_power() const {
             && _power_levels[i].active != PowerActive::Inactive) {
             return true;
         }
+    }
+    // Tramp accepts arbitrary mW; the table check above is SmartAudio-only
+    if (_power_mw > 0 && is_provider_enabled(VTXType::Tramp)) {
+        return true;
     }
     // asked for something unsupported - only SA2.1 allows this and will have already provided a list
     return false;
@@ -513,7 +593,7 @@ void AP_VideoTX::change_power(int8_t position)
     // first find out how many possible levels there are
     uint8_t num_active_levels = 0;
     for (uint8_t i = 0; i < VTX_MAX_POWER_LEVELS; i++) {
-        if (_power_levels[i].active != PowerActive::Inactive) {
+        if (_power_levels[i].active != PowerActive::Inactive && _power_levels[i].mw <= _max_power_mw) {
             num_active_levels++;
         }
     }
@@ -530,6 +610,11 @@ void AP_VideoTX::change_power(int8_t position)
             debug("selected power %dmw", power);
             break;
         }
+    }
+
+    if (position == 5 && power < _max_power_mw) {
+        power = _max_power_mw;
+        debug("selected power %dmw", power);
     }
 
     if (power == 0) {

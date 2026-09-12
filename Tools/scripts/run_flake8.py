@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 Runs flake8 over Python files which contain a marker indicating
@@ -7,11 +7,11 @@ they are clean, ensures that they actually are
  AP_FLAKE8_CLEAN
 """
 
+import argparse
 import os
+import pathlib
 import subprocess
 import sys
-
-import argparse
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -25,6 +25,8 @@ class Flake8Checker(object):
         print("****** %s" % (string,))
 
     def check(self):
+        if len(self.files_to_check) == 0:
+            return
         for path in self.files_to_check:
             self.progress("Checking (%s)" % path)
         ret = subprocess.run(["flake8", "--show-source"] + self.files_to_check,
@@ -34,12 +36,12 @@ class Flake8Checker(object):
             self.retcode = 1
 
     def run(self):
-        for (dirpath, dirnames, filenames) in os.walk("Tools"):
+        for (dirpath, dirnames, filenames) in os.walk("."):
             for filename in filenames:
                 if os.path.splitext(filename)[1] != ".py":
                     continue
                 filepath = os.path.join(dirpath, filename)
-                content = open(filepath).read()
+                content = pathlib.Path(filepath).read_text()
                 if "AP_FLAKE8_CLEAN" not in content:
                     continue
                 self.files_to_check.append(filepath)

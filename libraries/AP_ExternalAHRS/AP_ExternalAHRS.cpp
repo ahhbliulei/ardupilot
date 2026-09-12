@@ -13,19 +13,28 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 /*
-  suppport for serial connected AHRS systems
+  support for serial connected AHRS systems
  */
 
 #include "AP_ExternalAHRS_config.h"
 
-#if HAL_EXTERNAL_AHRS_ENABLED
+#if AP_EXTERNAL_AHRS_ENABLED
 
 #include "AP_ExternalAHRS.h"
 #include "AP_ExternalAHRS_backend.h"
+#include "AP_ExternalAHRS_Aeron_plx.h"
 #include "AP_ExternalAHRS_VectorNav.h"
-#include "AP_ExternalAHRS_LORD.h"
+#include "AP_ExternalAHRS_MicroStrain5.h"
+#include "AP_ExternalAHRS_MicroStrain7.h"
+#include "AP_ExternalAHRS_InertialLabs.h"
+#include "AP_ExternalAHRS_SBG.h"
+#include "AP_ExternalAHRS_GSOF.h"
+#include "AP_ExternalAHRS_SensAItion.h"
 
 #include <GCS_MAVLink/GCS.h>
+#include <AP_AHRS/AP_AHRS.h>
+#include <AP_GPS/AP_GPS.h>
+#include <AP_Logger/AP_Logger.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -53,7 +62,7 @@ const AP_Param::GroupInfo AP_ExternalAHRS::var_info[] = {
     // @Param: _TYPE
     // @DisplayName: AHRS type
     // @Description: Type of AHRS device
-    // @Values: 0:None,1:VectorNav,2:LORD
+    // @Values: 0:None,1:VectorNav,2:MicroStrain5,5:InertialLabs,6:Trimble GSOF,7:MicroStrain7,8:SBG,10:Aeron,11:SensAItion
     // @User: Standard
     AP_GROUPINFO_FLAGS("_TYPE", 1, AP_ExternalAHRS, devtype, HAL_EXTERNAL_AHRS_DEFAULT, AP_PARAM_FLAG_ENABLE),
 
@@ -67,7 +76,7 @@ const AP_Param::GroupInfo AP_ExternalAHRS::var_info[] = {
     // @Param: _OPTIONS
     // @DisplayName: External AHRS options
     // @Description: External AHRS options bitmask
-    // @Bitmask: 0:Vector Nav use uncompensated values for accel gyro and mag.
+    // @Bitmask: 0:Vector Nav use uncompensated values for accel gyro and mag, 1:SBG uses EKF as GNSS, 2:SensAItion used as AHRS
     // @User: Standard
     AP_GROUPINFO("_OPTIONS", 3, AP_ExternalAHRS, options, 0),
 
@@ -77,7 +86,14 @@ const AP_Param::GroupInfo AP_ExternalAHRS::var_info[] = {
     // @Bitmask: 0:GPS,1:IMU,2:Baro,3:Compass
     // @User: Advanced
     AP_GROUPINFO("_SENSORS", 4, AP_ExternalAHRS, sensors, 0xF),
-    
+
+    // @Param: _LOG_RATE
+    // @DisplayName: AHRS logging rate
+    // @Description: Logging rate for EAHRS devices
+    // @Units: Hz
+    // @User: Standard
+    AP_GROUPINFO("_LOG_RATE", 5, AP_ExternalAHRS, log_rate, 10),
+
     AP_GROUPEND
 };
 
@@ -92,21 +108,58 @@ void AP_ExternalAHRS::init(void)
     switch (DevType(devtype)) {
     case DevType::None:
         // nothing to do
-        break;
+        return;
+
 #if AP_EXTERNAL_AHRS_VECTORNAV_ENABLED
     case DevType::VecNav:
-        backend = new AP_ExternalAHRS_VectorNav(this, state);
-        break;
+        backend = NEW_NOTHROW AP_ExternalAHRS_VectorNav(this, state);
+        return;
 #endif
-#if AP_EXTERNAL_AHRS_LORD_ENABLED
-    case DevType::LORD:
-        backend = new AP_ExternalAHRS_LORD(this, state);
-        break;
-    default:
+
+#if AP_EXTERNAL_AHRS_MICROSTRAIN5_ENABLED
+    case DevType::MicroStrain5:
+        backend = NEW_NOTHROW AP_ExternalAHRS_MicroStrain5(this, state);
+        return;
 #endif
-        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Unsupported ExternalAHRS type %u", unsigned(devtype));
-        break;
+
+#if AP_EXTERNAL_AHRS_GSOF_ENABLED
+    case DevType::GSOF:
+        backend = NEW_NOTHROW AP_ExternalAHRS_GSOF(this, state);
+        return;
+#endif
+
+#if AP_EXTERNAL_AHRS_MICROSTRAIN7_ENABLED
+    case DevType::MicroStrain7:
+        backend = NEW_NOTHROW AP_ExternalAHRS_MicroStrain7(this, state);
+        return;
+#endif
+
+#if AP_EXTERNAL_AHRS_INERTIALLABS_ENABLED
+    case DevType::InertialLabs:
+        backend = NEW_NOTHROW AP_ExternalAHRS_InertialLabs(this, state);
+        return;
+#endif
+#if AP_EXTERNAL_AHRS_SENSAITION_ENABLED
+    case DevType::SensAItion:
+        backend = NEW_NOTHROW AP_ExternalAHRS_SensAItion(this, state);
+        return;
+#endif
+
+#if AP_EXTERNAL_AHRS_SBG_ENABLED
+    case DevType::SBG:
+        backend = NEW_NOTHROW AP_ExternalAHRS_SBG(this, state);
+        return;
+#endif  // AP_EXTERNAL_AHRS_SBG_ENABLED
+
+#if AP_EXTERNAL_AHRS_AERON_PLX_ENABLED
+    case DevType::Aeron:
+        backend = NEW_NOTHROW AP_ExternalAHRS_Aeron_plx(this, state);
+        return;
+#endif  // AP_EXTERNAL_AHRS_AERON_PLX_ENABLED
+
     }
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Unsupported ExternalAHRS type %u", unsigned(devtype));
 }
 
 bool AP_ExternalAHRS::enabled() const
@@ -148,10 +201,26 @@ bool AP_ExternalAHRS::get_origin(Location &loc)
 {
     if (state.have_origin) {
         WITH_SEMAPHORE(state.sem);
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+        if (!state.origin.initialised()) {
+            AP_HAL::panic("Uninitialized origin in AP_ExternalAHRS.");
+        }
+#endif
         loc = state.origin;
         return true;
     }
     return false;
+}
+
+bool AP_ExternalAHRS::set_origin(const Location &loc)
+{
+    WITH_SEMAPHORE(state.sem);
+    if (state.have_origin) {
+        return false;
+    }
+    state.origin = loc;
+    state.have_origin = true;
+    return true;
 }
 
 bool AP_ExternalAHRS::get_location(Location &loc)
@@ -161,6 +230,24 @@ bool AP_ExternalAHRS::get_location(Location &loc)
     }
     WITH_SEMAPHORE(state.sem);
     loc = state.location;
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (!loc.initialised()) {
+        AP_HAL::panic("Uninitialized location in AP_ExternalAHRS.");
+    }
+#endif
+
+    if (state.last_location_update_us != 0 &&
+        state.have_velocity) {
+        // extrapolate position based on velocity to cope with slow backends
+        const float dt = (AP_HAL::micros() - state.last_location_update_us)*1.0e-6;
+        if (dt < 1) {
+            // only extrapolate for 1s max
+            Vector3p ofs = state.velocity.topostype();
+            ofs *= dt;
+            loc.offset(ofs);
+        }
+    }
+
     return true;
 }
 
@@ -193,7 +280,42 @@ bool AP_ExternalAHRS::get_speed_down(float &speedD)
 
 bool AP_ExternalAHRS::pre_arm_check(char *failure_msg, uint8_t failure_msg_len) const
 {
-    return backend && backend->pre_arm_check(failure_msg, failure_msg_len);
+    if (backend == nullptr) {
+        hal.util->snprintf(failure_msg, failure_msg_len, "ExternalAHRS: Invalid backend");
+        return false;
+    }
+    if (!backend->pre_arm_check(failure_msg, failure_msg_len)) {
+        return false;
+    }
+    // Verify the user has configured the GPS to accept EAHRS data.
+    if (has_sensor(AvailableSensor::GPS)) {
+        const auto eahrs_gps_sensors = backend->num_gps_sensors();
+
+        const auto &gps = AP::gps();
+        uint8_t n_configured_eahrs_gps = 0;
+        for (uint8_t i = 0; i < GPS_MAX_INSTANCES; ++i) {
+            const auto gps_type = gps.get_type(i);
+            if (gps_type == AP_GPS::GPS_TYPE_EXTERNAL_AHRS) {
+                n_configured_eahrs_gps++;
+            }
+        }
+
+        // Once AP supports at least 3 GPS's, change to == and remove the second condition.
+        // At that point, enforce that all GPS's in EAHRS can report to AP_GPS.
+        if (n_configured_eahrs_gps < 1 && eahrs_gps_sensors >= 1) {
+            hal.util->snprintf(failure_msg, failure_msg_len, "ExternalAHRS: Incorrect number of GPS sensors configured for EAHRS");
+            return false;
+        }
+    }
+    AP_AHRS &ahrs = AP::ahrs();
+    if (ahrs.configured_ekf_type() == AP_AHRS::EKFType::EXTERNAL) {
+        // when using EAHRS as the EKF source, we must have a valid position origin
+        if (!state.have_origin) {
+            hal.util->snprintf(failure_msg, failure_msg_len, "ExternalAHRS: No origin");
+            return false;
+        }
+    }
+    return true;
 }
 
 /*
@@ -207,24 +329,35 @@ void AP_ExternalAHRS::get_filter_status(nav_filter_status &status) const
     }
 }
 
-Vector3f AP_ExternalAHRS::get_gyro(void)
+/*
+  get estimated variances, return false if not implemented
+ */
+bool AP_ExternalAHRS::get_variances(float &velVar, float &posVar, float &hgtVar, Vector3f &magVar, float &tasVar) const
 {
-    WITH_SEMAPHORE(state.sem);
-    return state.gyro;
-}
-
-Vector3f AP_ExternalAHRS::get_accel(void)
-{
-    WITH_SEMAPHORE(state.sem);
-    return state.accel;
-}
-
-// send an EKF_STATUS message to GCS
-void AP_ExternalAHRS::send_status_report(GCS_MAVLINK &link) const
-{
-    if (backend) {
-        backend->send_status_report(link);
+    if (backend != nullptr) {
+        return backend->get_variances(velVar, posVar, hgtVar, magVar, tasVar);
     }
+    return false;
+}
+
+bool AP_ExternalAHRS::get_gyro(Vector3f &gyro)
+{
+    WITH_SEMAPHORE(state.sem);
+    if (!has_sensor(AvailableSensor::IMU)) {
+        return false;
+    }
+    gyro = state.gyro;
+    return true;
+}
+
+bool AP_ExternalAHRS::get_accel(Vector3f &accel)
+{
+    WITH_SEMAPHORE(state.sem);
+    if (!has_sensor(AvailableSensor::IMU)) {
+        return false;
+    }
+    accel = state.accel;
+    return true;
 }
 
 void AP_ExternalAHRS::update(void)
@@ -232,6 +365,65 @@ void AP_ExternalAHRS::update(void)
     if (backend) {
         backend->update();
     }
+
+    WITH_SEMAPHORE(state.sem);
+#if HAL_LOGGING_ENABLED
+    const uint32_t now_ms = AP_HAL::millis();
+    if (enabled() && log_rate.get() > 0 && now_ms - last_log_ms >= uint32_t(1000U/log_rate.get())) {
+        last_log_ms = now_ms;
+
+        // @LoggerMessage: EAHR
+        // @Description: External AHRS data
+        // @Field: TimeUS: Time since system startup
+        // @Field: Roll: euler roll
+        // @Field: Pitch: euler pitch
+        // @Field: Yaw: euler yaw
+        // @Field: VN: velocity north
+        // @Field: VE: velocity east
+        // @Field: VD: velocity down
+        // @Field: Lat: latitude
+        // @Field: Lon: longitude
+        // @Field: Alt: altitude AMSL
+        // @Field: Flg: nav status flags
+
+        float roll, pitch, yaw;
+        state.quat.to_euler(roll, pitch, yaw);
+        nav_filter_status filterStatus {};
+        get_filter_status(filterStatus);
+
+        AP::logger().WriteStreaming("EAHR", "TimeUS,Roll,Pitch,Yaw,VN,VE,VD,Lat,Lon,Alt,Flg",
+                                    "sdddnnnDUm-",
+                                    "F000000GG0-",
+                                    "QffffffLLfI",
+                                    AP_HAL::micros64(),
+                                    degrees(roll), degrees(pitch), degrees(yaw),
+                                    state.velocity.x, state.velocity.y, state.velocity.z,
+                                    state.location.lat, state.location.lng, state.location.alt*0.01,
+                                    filterStatus.value);
+
+        // @LoggerMessage: EAHV
+        // @Description: External AHRS variances
+        // @Field: TimeUS: Time since system startup
+        // @Field: Vel: velocity variance
+        // @Field: Pos: position variance
+        // @Field: Hgt: height variance
+        // @Field: MagX: magnetic variance, X
+        // @Field: MagY: magnetic variance, Y
+        // @Field: MagZ: magnetic variance, Z
+        // @Field: TAS: true airspeed variance
+
+        float velVar, posVar, hgtVar, tasVar;
+        Vector3f magVar;
+        if (backend != nullptr && backend->get_variances(velVar, posVar, hgtVar, magVar, tasVar)) {
+            AP::logger().WriteStreaming("EAHV", "TimeUS,Vel,Pos,Hgt,MagX,MagY,MagZ,TAS",
+                                        "Qfffffff",
+                                        AP_HAL::micros64(),
+                                        velVar, posVar, hgtVar,
+                                        magVar.x, magVar.y, magVar.z,
+                                        tasVar);
+        }
+    }
+#endif  // HAL_LOGGING_ENABLED
 }
 
 // Get model/type name
@@ -252,5 +444,5 @@ AP_ExternalAHRS &externalAHRS()
 
 };
 
-#endif  // HAL_EXTERNAL_AHRS_ENABLED
+#endif  // AP_EXTERNAL_AHRS_ENABLED
 

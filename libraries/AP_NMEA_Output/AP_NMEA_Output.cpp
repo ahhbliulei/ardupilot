@@ -17,7 +17,7 @@
 
  */
 
-#define ALLOW_DOUBLE_MATH_FUNCTIONS
+#define AP_MATH_ALLOW_DOUBLE_FUNCTIONS 1
 
 #include "AP_NMEA_Output.h"
 
@@ -96,30 +96,35 @@ void AP_NMEA_Output::update()
 
     // get time and date
     uint64_t time_usec;
+#if AP_RTC_ENABLED
     if (!AP::rtc().get_utc_usec(time_usec)) {
         return;
     }
+#else
+    time_usec = 0;
+#endif
 
     uint32_t space_required = 0;
 
     // not completely accurate, our time includes leap seconds and time_t should be without
     const time_t time_sec = time_usec / 1000000;
-    struct tm* tm = gmtime(&time_sec);
+    struct tm tmd {};
+    struct tm* tm = gmtime_r(&time_sec, &tmd);
 
     // format time string
-    char tstring[11];
-    snprintf(tstring, sizeof(tstring), "%02u%02u%06.2f", tm->tm_hour, tm->tm_min, tm->tm_sec + (time_usec % 1000000) * 1.0e-6);
+    char tstring[10];
+    hal.util->snprintf(tstring, sizeof(tstring), "%02u%02u%05.2f", tm->tm_hour, tm->tm_min, tm->tm_sec + (time_usec % 1000000) * 1.0e-6);
 
     Location loc;
     const auto &gps = AP::gps();
-    const AP_GPS::GPS_Status gps_status = gps.status();
+    const AP_GPS_FixType gps_status = gps.status();
 
 #if AP_AHRS_ENABLED
     auto &ahrs = AP::ahrs();
     // NOTE: ahrs.get_location() always returns true after having GPS position once because it will be dead-reckoning
     const bool pos_valid = ahrs.get_location(loc);
 #else
-    const bool pos_valid = (gps_status >= AP_GPS::GPS_OK_FIX_3D);
+    const bool pos_valid = (gps_status >= AP_GPS_FixType::FIX_3D);
     loc = gps.location();
 #endif
 
@@ -127,7 +132,7 @@ void AP_NMEA_Output::update()
     char lat_string[13];
     double deg = fabs(loc.lat * 1.0e-7f);
     double min_dec = ((fabs(loc.lat) - (unsigned)deg * 1.0e7)) * 60 * 1.e-7f;
-    snprintf(lat_string,
+    hal.util->snprintf(lat_string,
             sizeof(lat_string),
             "%02u%08.5f,%c",
             (unsigned) deg,
@@ -138,7 +143,7 @@ void AP_NMEA_Output::update()
     char lng_string[14];
     deg = fabs(loc.lng * 1.0e-7f);
     min_dec = ((fabs(loc.lng) - (unsigned)deg * 1.0e7)) * 60 * 1.e-7f; 
-    snprintf(lng_string,
+    hal.util->snprintf(lng_string,
             sizeof(lng_string),
             "%03u%08.5f,%c",
             (unsigned) deg,
@@ -151,7 +156,7 @@ void AP_NMEA_Output::update()
     if ((_message_enable_bitmask.get() & static_cast<int16_t>(Enabled_Messages::GPGGA)) != 0) {
         // format GGA message
 
-        // Convert AP_GPS::GPS_Status:
+        // Convert AP_GPS_FixType:
         // 0 = NO_GPS
         // 1 = NO_FIX
         // 2 = GPS_OK_FIX_2D
@@ -177,22 +182,22 @@ void AP_NMEA_Output::update()
         uint8_t fix_quality;
         switch (gps_status) {
             default:
-            case AP_GPS::NO_GPS:
-            case AP_GPS::NO_FIX:
-            case AP_GPS::GPS_OK_FIX_2D:
+            case AP_GPS_FixType::NO_GPS:
+            case AP_GPS_FixType::NONE:
+            case AP_GPS_FixType::FIX_2D:
                 // NOTE: ahrs.get_location() always returns pos_valid=true after having GPS position once because it will be dead-reckoning
                  fix_quality = pos_valid ? 6 : 0;
                 break;
-            case AP_GPS::GPS_OK_FIX_3D:
+            case AP_GPS_FixType::FIX_3D:
                 fix_quality = 1;
                 break;
-            case AP_GPS::GPS_OK_FIX_3D_DGPS:
+            case AP_GPS_FixType::DGPS:
                 fix_quality = 2;
                 break;
-            case AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT:
+            case AP_GPS_FixType::RTK_FLOAT:
                 fix_quality = 5;
                 break;
-            case AP_GPS::GPS_OK_FIX_3D_RTK_FIXED:
+            case AP_GPS_FixType::RTK_FIXED:
                 fix_quality = 4;
                 break;
         }
@@ -204,7 +209,7 @@ void AP_NMEA_Output::update()
                                     lng_string,
                                     fix_quality,
                                     gps.num_sats(),
-                                    gps.get_hdop(),
+                                    gps.get_hdop()*0.01,
                                     loc.alt * 0.01f);
 
         space_required += gga_length;
@@ -215,7 +220,7 @@ void AP_NMEA_Output::update()
     if ((_message_enable_bitmask.get() & static_cast<int16_t>(Enabled_Messages::GPRMC)) != 0) {
         // format date string
         char dstring[7];
-        snprintf(dstring, sizeof(dstring), "%02u%02u%02u", tm->tm_mday, tm->tm_mon+1, tm->tm_year % 100);
+        hal.util->snprintf(dstring, sizeof(dstring), "%02u%02u%02u", tm->tm_mday, tm->tm_mon+1, tm->tm_year % 100);
 
         // get speed
 #if AP_AHRS_ENABLED
@@ -246,9 +251,9 @@ void AP_NMEA_Output::update()
 #if AP_AHRS_ENABLED
     if ((_message_enable_bitmask.get() & static_cast<int16_t>(Enabled_Messages::PASHR)) != 0) {
         // get roll, pitch, yaw
-        const float roll_deg = wrap_180(degrees(ahrs.get_roll()));
-        const float pitch_deg = wrap_180(degrees(ahrs.get_pitch()));
-        const float yaw_deg = wrap_360(degrees(ahrs.get_yaw()));
+        const float roll_deg = wrap_180(ahrs.get_roll_deg());
+        const float pitch_deg = wrap_180(ahrs.get_pitch_deg());
+        const float yaw_deg = ahrs.get_yaw_deg();
         const float heave_m = 0; // instantaneous heave in meters
         const float roll_deg_accuracy = 0; // stddev of roll_deg;
         const float pitch_deg_accuracy = 0; // stddev of pitch_deg;
@@ -258,8 +263,8 @@ void AP_NMEA_Output::update()
         // 0 = no position
         // 1 = All non-RTK fixed integer positions
         // 2 = RTK fixed integer positions
-        const uint8_t gps_status_flag = (gps_status >= AP_GPS::GPS_OK_FIX_3D_RTK_FIXED) ? 2 :
-                                                    (gps_status >= AP_GPS::GPS_OK_FIX_2D ? 1 : 0);
+        const uint8_t gps_status_flag = (gps_status >= AP_GPS_FixType::RTK_FIXED) ? 2 :
+                                                    (gps_status >= AP_GPS_FixType::FIX_2D ? 1 : 0);
 
         // INS Status Flag:
         // 0 = All SPAN Pre-Alignment INS Status

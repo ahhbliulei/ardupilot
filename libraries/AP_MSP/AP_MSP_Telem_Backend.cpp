@@ -25,10 +25,11 @@
 #include <AP_Notify/AP_Notify.h>
 #include <AP_OpticalFlow/AP_OpticalFlow.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
-#include <AP_RCMapper/AP_RCMapper.h>
 #include <AP_RSSI/AP_RSSI.h>
 #include <AP_RTC/AP_RTC.h>
+#include <AP_VideoTX/AP_VideoTX.h>
 #include <GCS_MAVLink/GCS.h>
+#include <AP_Vehicle/AP_Vehicle.h>
 
 #include "AP_MSP.h"
 #include "AP_MSP_Telem_Backend.h"
@@ -66,11 +67,16 @@ void AP_MSP_Telem_Backend::setup_wfq_scheduler(void)
     set_scheduler_entry(ATTITUDE, 200, 200);          // 5Hz  attitude
     set_scheduler_entry(ALTITUDE, 250, 250);          // 4Hz  altitude(cm) and velocity(cm/s)
     set_scheduler_entry(ANALOG, 250, 250);            // 4Hz  rssi + batt
+#if AP_BATTERY_ENABLED
     set_scheduler_entry(BATTERY_STATE, 500, 500);     // 2Hz  battery
+#endif
 #if HAL_WITH_ESC_TELEM
     set_scheduler_entry(ESC_SENSOR_DATA, 500, 500);   // 2Hz  ESC telemetry
 #endif
     set_scheduler_entry(RTC_DATETIME, 1000, 1000);    // 1Hz  RTC
+#if AP_MSP_VIDEOTX_ENABLED
+    set_scheduler_entry(VTX_PARAMETERS, 1000, 1000);  // 1Hz  VTX
+#endif
 }
 
 /*
@@ -114,12 +120,18 @@ bool AP_MSP_Telem_Backend::is_packet_ready(uint8_t idx, bool queue_empty)
     case ATTITUDE:          // Attitude
     case ALTITUDE:          // Altitude and Vario
     case ANALOG:            // Rssi, Battery, mAh, Current
+#if AP_BATTERY_ENABLED
     case BATTERY_STATE:     // voltage, capacity, current, mAh
+#endif
 #if HAL_WITH_ESC_TELEM
     case ESC_SENSOR_DATA:   // esc temp + rpm
 #endif
     case RTC_DATETIME:      // RTC
         return true;
+#if AP_MSP_VIDEOTX_ENABLED
+    case VTX_PARAMETERS:    // VTX control
+        return AP::vtx().have_params_changed();
+#endif
     default:
         return false;
     }
@@ -134,6 +146,14 @@ void AP_MSP_Telem_Backend::process_packet(uint8_t idx)
         return;
     }
 
+#if AP_MSP_VIDEOTX_ENABLED
+    // the VTX config is pushed on change rather than every tick, and only once
+    // the air unit has completed its boot handshake
+    if (msp_packet_type_map[idx] == MSP_VTX_CONFIG && !vtx_should_push_config()) {
+        return;
+    }
+#endif
+
     uint8_t out_buf[MSP_PORT_OUTBUF_SIZE] {};
 
     msp_packet_t reply = {
@@ -144,21 +164,33 @@ void AP_MSP_Telem_Backend::process_packet(uint8_t idx)
     };
     uint8_t *out_buf_head = reply.buf.ptr;
 
-    msp_process_out_command(msp_packet_type_map[idx], &reply.buf);
+    msp_process_out_command(msp_packet_type_map[idx], nullptr, &reply.buf);
     uint32_t len = reply.buf.ptr - &out_buf[0];
     sbuf_switch_to_reader(&reply.buf, out_buf_head); // change streambuf direction
+
+    // the negotiated version is only known once the peer has sent us something;
+    // betaflight pushes the VTX config as MSP v2 native, so match that for an
+    // MSP VTX which otherwise ignores the unsolicited v1 frame
+    msp_version_e version = _msp_port.msp_version;
+#if AP_MSP_VIDEOTX_ENABLED
+    if (msp_packet_type_map[idx] == MSP_VTX_CONFIG) {
+        version = MSP_V2_NATIVE;
+    }
+#endif
     if (len > 0) {
         // don't send zero length packets
-        msp_serial_encode(&_msp_port, &reply, _msp_port.msp_version);
+        msp_serial_encode(&_msp_port, &reply, version);
     }
 
     _msp_port.c_state = MSP_IDLE;
 }
 
+#if AP_BATTERY_ENABLED
 uint8_t AP_MSP_Telem_Backend::calc_cell_count(const float battery_voltage)
 {
     return floorf((battery_voltage / CELLFULL) + 1);
 }
+#endif
 
 float AP_MSP_Telem_Backend::get_vspeed_ms(void) const
 {
@@ -195,6 +227,7 @@ void AP_MSP_Telem_Backend::update_home_pos(home_state_t &home_state)
     home_state.home_is_set = _ahrs.home_is_set();
 }
 
+#if AP_GPS_ENABLED
 void AP_MSP_Telem_Backend::update_gps_state(gps_state_t &gps_state)
 {
     AP_GPS& gps = AP::gps();
@@ -202,7 +235,7 @@ void AP_MSP_Telem_Backend::update_gps_state(gps_state_t &gps_state)
     memset(&gps_state, 0, sizeof(gps_state));
 
     WITH_SEMAPHORE(gps.get_semaphore());
-    gps_state.fix_type = gps.status() >= AP_GPS::GPS_Status::GPS_OK_FIX_3D? 2:0;
+    gps_state.fix_type = gps.status() >= AP_GPS_FixType::FIX_3D? 2:0;
     gps_state.num_sats = gps.num_sats();
 
     if (gps_state.fix_type > 0) {
@@ -211,10 +244,12 @@ void AP_MSP_Telem_Backend::update_gps_state(gps_state_t &gps_state)
         gps_state.lon = loc.lng;
         gps_state.alt_m = loc.alt/100; // 1m resolution
         gps_state.speed_cms = gps.ground_speed() * 100;
-        gps_state.ground_course_cd = gps.ground_course_cd();
+        gps_state.ground_course_dd = gps.ground_course_cd() / 10;
     }
 }
+#endif
 
+#if AP_BATTERY_ENABLED
 void AP_MSP_Telem_Backend::update_battery_state(battery_state_t &battery_state)
 {
     memset(&battery_state, 0, sizeof(battery_state));
@@ -241,12 +276,13 @@ void AP_MSP_Telem_Backend::update_battery_state(battery_state_t &battery_state)
         battery_state.batt_cellcount = cc;
     }
 }
+#endif  // AP_BATTERY_ENABLED
 
 void AP_MSP_Telem_Backend::update_airspeed(airspeed_state_t &airspeed_state)
 {
     AP_AHRS &ahrs = AP::ahrs();
     WITH_SEMAPHORE(ahrs.get_semaphore());
-    airspeed_state.airspeed_have_estimate = ahrs.airspeed_estimate(airspeed_state.airspeed_estimate_ms);
+    airspeed_state.airspeed_have_estimate = ahrs.airspeed_EAS(airspeed_state.airspeed_estimate_ms);
     if (!airspeed_state.airspeed_have_estimate) {
         airspeed_state.airspeed_estimate_ms = 0.0;
     }
@@ -280,7 +316,9 @@ void AP_MSP_Telem_Backend::update_flight_mode_str(char *flight_mode_str, uint8_t
         Vector3f v;
         {
             WITH_SEMAPHORE(ahrs.get_semaphore());
-            v = ahrs.wind_estimate();
+            // use the estimate even if it is not marked valid, to
+            // preserve existing behaviour
+            IGNORE_RETURN(ahrs.get_wind(v));
         }
         bool invert_wind = false;
 #if OSD_ENABLED
@@ -303,7 +341,14 @@ void AP_MSP_Telem_Backend::update_flight_mode_str(char *flight_mode_str, uint8_t
         const char* unit = (units == OSD_UNIT_METRIC) ? "m/s" : "f/s";
 
         if (v_length > 1.0f) {
-            const int32_t angle = wrap_360_cd(DEGX100 * atan2f(v.y, v.x) - ahrs.yaw_sensor);
+#if AP_VEHICLE_ENABLED
+            float roll_rad, pitch_rad, yaw_rad;
+            AP::vehicle()->get_osd_attitude_rad(roll_rad, pitch_rad, yaw_rad);
+#else
+            float yaw_rad = ahrs.get_yaw_rad();
+#endif // AP_VEHICLE_ENABLED
+
+            const int32_t angle = wrap_360_cd(rad_to_cd(atan2f(v.y, v.x)) - rad_to_cd(yaw_rad));
             const int32_t interval = 36000 / ARRAY_SIZE(arrows);
             uint8_t arrow = arrows[((angle + interval / 2) / interval) % ARRAY_SIZE(arrows)];
             snprintf(flight_mode_str, size, "%s %d%s%c%c%c", notify->get_flight_mode_str(),  (uint8_t)roundf(v_length), unit, 0xE2, 0x86, arrow);
@@ -334,7 +379,9 @@ void AP_MSP_Telem_Backend::enable_warnings()
         return;
     }
     BIT_SET(msp->_osd_config.enabled_warnings, OSD_WARNING_FAIL_SAFE);
+#if AP_BATTERY_ENABLED
     BIT_SET(msp->_osd_config.enabled_warnings, OSD_WARNING_BATTERY_CRITICAL);
+#endif
 }
 
 void AP_MSP_Telem_Backend::process_incoming_data()
@@ -411,6 +458,7 @@ void AP_MSP_Telem_Backend::msp_process_received_command()
 
 /*
   ported from inav/src/main/fc/fc_msp.c
+  pull-mode telemetry
  */
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_command(msp_packet_t *cmd, msp_packet_t *reply)
 {
@@ -424,7 +472,7 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_command(msp_packet_t *cmd, ms
     if (MSP2_IS_SENSOR_MESSAGE(cmd_msp)) {
         ret = msp_process_sensor_command(cmd_msp, src);
     } else {
-        ret = msp_process_out_command(cmd_msp, dst);
+        ret = msp_process_out_command(cmd_msp, src, dst);
     }
 
     // Process DONT_REPLY flag
@@ -436,7 +484,7 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_command(msp_packet_t *cmd, ms
     return ret;
 }
 
-MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_command(uint16_t cmd_msp, sbuf_t *dst)
+MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_command(uint16_t cmd_msp, sbuf_t *src, sbuf_t *dst)
 {
     switch (cmd_msp) {
     case MSP_API_VERSION:
@@ -453,6 +501,8 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_command(uint16_t cmd_msp,
         return msp_process_out_name(dst);
     case MSP_OSD_CONFIG:
         return msp_process_out_osd_config(dst);
+    case MSP_OSD_CANVAS:
+        return msp_process_out_osd_canvas(dst);
     case MSP_STATUS:
     case MSP_STATUS_EX:
         return msp_process_out_status(dst);
@@ -466,8 +516,10 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_command(uint16_t cmd_msp,
         return msp_process_out_altitude(dst);
     case MSP_ANALOG:
         return msp_process_out_analog(dst);
+#if AP_BATTERY_ENABLED
     case MSP_BATTERY_STATE:
         return msp_process_out_battery_state(dst);
+#endif
     case MSP_UID:
         return msp_process_out_uid(dst);
 #if HAL_WITH_ESC_TELEM
@@ -478,6 +530,16 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_command(uint16_t cmd_msp,
         return msp_process_out_rtc(dst);
     case MSP_RC:
         return msp_process_out_rc(dst);
+#if AP_MSP_VIDEOTX_ENABLED
+    case MSP_VTX_CONFIG:
+        // reply with our config whether this is our proactive push (src == null)
+        // or a GET request from the VTX/goggle (src != null), which polls it
+        return msp_process_out_vtx_config(src, dst);
+    case MSP_SET_VTX_CONFIG:
+        return msp_process_in_vtx_config(src, dst);
+    case MSP_SET_VTXTABLE_POWERLEVEL:
+        return msp_process_in_vtxtable_powerlevel(src, dst);
+#endif  // AP_MSP_VIDEOTX_ENABLED
     default:
         // MSP always requires an ACK even for unsupported messages
         return MSP_RESULT_ACK;
@@ -489,99 +551,115 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_sensor_command(uint16_t cmd_m
     MSP_UNUSED(src);
 
     switch (cmd_msp) {
+#if HAL_MSP_RANGEFINDER_ENABLED
     case MSP2_SENSOR_RANGEFINDER: {
         const MSP::msp_rangefinder_data_message_t *pkt = (const MSP::msp_rangefinder_data_message_t *)src->ptr;
         msp_handle_rangefinder(*pkt);
     }
     break;
+#endif
+#if HAL_MSP_OPTICALFLOW_ENABLED
     case MSP2_SENSOR_OPTIC_FLOW: {
         const MSP::msp_opflow_data_message_t *pkt = (const MSP::msp_opflow_data_message_t *)src->ptr;
         msp_handle_opflow(*pkt);
     }
     break;
+#endif
+#if HAL_MSP_GPS_ENABLED
     case MSP2_SENSOR_GPS: {
         const MSP::msp_gps_data_message_t *pkt = (const MSP::msp_gps_data_message_t *)src->ptr;
         msp_handle_gps(*pkt);
     }
     break;
+#endif
+#if AP_COMPASS_MSP_ENABLED
     case MSP2_SENSOR_COMPASS: {
         const MSP::msp_compass_data_message_t *pkt = (const MSP::msp_compass_data_message_t *)src->ptr;
         msp_handle_compass(*pkt);
     }
     break;
+#endif
+#if AP_BARO_MSP_ENABLED
     case MSP2_SENSOR_BAROMETER: {
         const MSP::msp_baro_data_message_t *pkt = (const MSP::msp_baro_data_message_t *)src->ptr;
         msp_handle_baro(*pkt);
     }
     break;
+#endif
+#if AP_AIRSPEED_MSP_ENABLED && AP_AIRSPEED_ENABLED
     case MSP2_SENSOR_AIRSPEED: {
         const MSP::msp_airspeed_data_message_t *pkt = (const MSP::msp_airspeed_data_message_t *)src->ptr;
         msp_handle_airspeed(*pkt);
     }
     break;
+#endif
     }
 
     return MSP_RESULT_NO_REPLY;
 }
 
+#if HAL_MSP_OPTICALFLOW_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_opflow(const MSP::msp_opflow_data_message_t &pkt)
 {
-#if HAL_MSP_OPTICALFLOW_ENABLED
     AP_OpticalFlow *optflow = AP::opticalflow();
     if (optflow == nullptr) {
         return;
     }
     optflow->handle_msp(pkt);
-#endif
 }
+#endif
 
+#if HAL_MSP_RANGEFINDER_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_rangefinder(const MSP::msp_rangefinder_data_message_t &pkt)
 {
-#if HAL_MSP_RANGEFINDER_ENABLED
     RangeFinder *rangefinder = AP::rangefinder();
     if (rangefinder == nullptr) {
         return;
     }
     rangefinder->handle_msp(pkt);
-#endif
 }
+#endif
 
+#if HAL_MSP_GPS_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_gps(const MSP::msp_gps_data_message_t &pkt)
 {
-#if HAL_MSP_GPS_ENABLED
     AP::gps().handle_msp(pkt);
-#endif
 }
+#endif
 
+#if AP_COMPASS_MSP_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_compass(const MSP::msp_compass_data_message_t &pkt)
 {
-#if AP_COMPASS_MSP_ENABLED
     AP::compass().handle_msp(pkt);
-#endif
 }
+#endif
 
+#if AP_BARO_MSP_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_baro(const MSP::msp_baro_data_message_t &pkt)
 {
-#if AP_BARO_MSP_ENABLED
     AP::baro().handle_msp(pkt);
-#endif
 }
+#endif
 
+#if AP_AIRSPEED_MSP_ENABLED && AP_AIRSPEED_ENABLED
 void AP_MSP_Telem_Backend::msp_handle_airspeed(const MSP::msp_airspeed_data_message_t &pkt)
 {
-#if AP_AIRSPEED_MSP_ENABLED && AP_AIRSPEED_ENABLED
     auto *airspeed = AP::airspeed();
     if (airspeed) {
         airspeed->handle_msp(pkt);
     }
-#endif
 }
+#endif
 
 uint32_t AP_MSP_Telem_Backend::get_osd_flight_mode_bitmask(void)
 {
     // Note: we only set the BOXARM bit (bit 0) which is the same for BF, INAV and DJI VTX
     // When armed we simply return 1 (1 == 1 << 0)
-    if (hal.util->get_soft_armed()) {
+    // VTXs that drop to low power when disarmed watch this bit, so the
+    // ForceVTXHighPower option keeps it set to hold the VTX at full power
+    const AP_MSP *msp = AP::msp();
+    if (hal.util->get_soft_armed()
+        || (msp != nullptr && msp->is_option_enabled(AP_MSP::Option::VTX_HIGH_POWER))) {
         return 1U;
     }
     return 0U;
@@ -633,8 +711,10 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_raw_gps(sbuf_t *dst)
         return MSP_RESULT_ERROR;
     }
 #endif
-    gps_state_t gps_state;
+    gps_state_t gps_state {};
+#if AP_GPS_ENABLED
     update_gps_state(gps_state);
+#endif
 
     // handle airspeed override
     bool airspeed_en = false;
@@ -786,6 +866,34 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_status(sbuf_t *dst)
     return MSP_RESULT_ACK;
 }
 
+MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_osd_canvas(sbuf_t *dst)
+{
+    // report the canvas matching the current screen's text resolution so an HD
+    // goggle sizes its OSD grid correctly (TXT_RES 0:30x16, 1:50x18, 2:60x22)
+    struct PACKED {
+        uint8_t cols;
+        uint8_t rows;
+    } canvas { 30, 16 };
+#if OSD_ENABLED
+    const AP_OSD *osd = AP::osd();
+    const AP_MSP *msp = AP::msp();
+    if (osd != nullptr && msp != nullptr) {
+        switch (osd->screen[msp->_msp_status.current_screen].get_txt_resolution()) {
+        case 1:
+            canvas = { 50, 18 };
+            break;
+        case 2:
+            canvas = { 60, 22 };
+            break;
+        default:
+            break;
+        }
+    }
+#endif
+    sbuf_write_data(dst, &canvas, sizeof(canvas));
+    return MSP_RESULT_ACK;
+}
+
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_osd_config(sbuf_t *dst)
 {
 #if OSD_ENABLED
@@ -869,17 +977,25 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_osd_config(sbuf_t *dst)
 
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_attitude(sbuf_t *dst)
 {
+#if AP_VEHICLE_ENABLED
+    float roll_rad, pitch_rad, yaw_rad;
+    AP::vehicle()->get_osd_attitude_rad(roll_rad, pitch_rad, yaw_rad);
+#else
     AP_AHRS &ahrs = AP::ahrs();
     WITH_SEMAPHORE(ahrs.get_semaphore());
+    float roll_rad = ahrs.get_roll_rad();
+    float pitch_rad = ahrs.get_pitch_rad();
+    float yaw_rad = ahrs.get_yaw_rad();
+#endif // AP_VEHICLE_ENABLED
 
     const struct PACKED {
         int16_t roll;
         int16_t pitch;
         int16_t yaw;
     } attitude {
-        roll : int16_t(ahrs.roll_sensor * 0.1),     // centidegress to decidegrees
-        pitch : int16_t(ahrs.pitch_sensor * 0.1),   // centidegress to decidegrees
-        yaw : int16_t(ahrs.yaw_sensor * 0.01)       // centidegress to degrees
+        roll : int16_t(degrees(roll_rad) * 10),     // degress to decidegrees
+        pitch : int16_t(degrees(pitch_rad) * 10),   // degress to decidegrees
+        yaw : int16_t(wrap_360(degrees(yaw_rad)))
     };
 
     sbuf_write_data(dst, &attitude, sizeof(attitude));
@@ -905,6 +1021,7 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_altitude(sbuf_t *dst)
 
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_analog(sbuf_t *dst)
 {
+#if AP_BATTERY_ENABLED
     battery_state_t battery_state;
     update_battery_state(battery_state);
 
@@ -922,10 +1039,27 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_analog(sbuf_t *dst)
         current_ca : (int16_t)constrain_int32(battery_state.batt_current_a * 100, -0x8000, 0x7FFF),         // current A to cA (0.01 steps, range is -320A to 320A)
         voltage_cv : (uint16_t)constrain_int32(battery_state.batt_voltage_v * 100,0,0xFFFF)                 // battery voltage in 0.01V steps
     };
+#else
+    float rssi;
+    const struct PACKED {
+        uint8_t voltage_dv;
+        uint16_t mah;
+        uint16_t rssi;
+        int16_t current_ca;
+        uint16_t voltage_cv;
+    } analog {
+        voltage_dv : 0,
+        mah : 0,
+        rssi : uint16_t(get_rssi(rssi) ? constrain_float(rssi,0,1) * 1023 : 0),                             // rssi 0-1 to 0-1023)
+        current_ca : 0,
+        voltage_cv : 0
+    };
+#endif
     sbuf_write_data(dst, &analog, sizeof(analog));
     return MSP_RESULT_ACK;
 }
 
+#if AP_BATTERY_ENABLED
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_battery_state(sbuf_t *dst)
 {
     const AP_MSP *msp = AP::msp();
@@ -956,6 +1090,7 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_battery_state(sbuf_t *dst
     sbuf_write_data(dst, &battery, sizeof(battery));
     return MSP_RESULT_ACK;
 }
+#endif
 
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_esc_sensor_data(sbuf_t *dst)
 {
@@ -989,10 +1124,13 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rtc(sbuf_t *dst)
 {
     tm localtime_tm {}; // year is relative to 1900
     uint64_t time_usec = 0;
+#if AP_RTC_ENABLED
     if (AP::rtc().get_utc_usec(time_usec)) { // may fail, leaving time_unix at 0
         const time_t time_sec = time_usec / 1000000;
-        localtime_tm = *gmtime(&time_sec);
+        struct tm tmd {};
+        localtime_tm = *gmtime_r(&time_sec, &tmd);
     }
+#endif
     const struct PACKED {
         uint16_t year;
         uint8_t mon;
@@ -1018,12 +1156,10 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rtc(sbuf_t *dst)
 #if AP_RC_CHANNEL_ENABLED
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)
 {
-    const RCMapper* rcmap = AP::rcmap();
-    if (rcmap == nullptr) {
-        return MSP_RESULT_ERROR;
-    }
-    uint16_t values[16] = {};
-    rc().get_radio_in(values, ARRAY_SIZE(values));
+    float roll = rc().get_roll_channel().norm_input_dz();
+    float pitch = -rc().get_pitch_channel().norm_input_dz();
+    float yaw = rc().get_yaw_channel().norm_input_dz();
+    float throttle = rc().get_throttle_channel().norm_input_dz();
 
     const struct PACKED {
         uint16_t a;
@@ -1032,17 +1168,278 @@ MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_rc(sbuf_t *dst)
         uint16_t t;
     } rc {
         // send only 4 channels, MSP order is AERT
-        // note: rcmap channels start at 1
-        a : values[rcmap->roll()-1],       // A
-        e : values[rcmap->pitch()-1],      // E
-        r : values[rcmap->yaw()-1],        // R
-        t : values[rcmap->throttle()-1]    // T
+        a : uint16_t(roll*500+1500),       // A
+        e : uint16_t(pitch*500+1500),      // E
+        r : uint16_t(yaw*500+1500),        // R
+        t : uint16_t(throttle*1000+1000)    // T
     };
 
     sbuf_write_data(dst, &rc, sizeof(rc));
     return MSP_RESULT_ACK;
 }
 #endif  // AP_RC_CHANNEL_ENABLED
+
+#if AP_MSP_VIDEOTX_ENABLED
+// set the configured pitmode option without disturbing the other option bits
+void AP_MSP_Telem_Backend::msp_vtx_set_pitmode(bool pitmode)
+{
+    AP::vtx().set_option_enabled(AP_VideoTX::VideoOptions::VTX_PITMODE, pitmode);
+}
+
+// fallback power plan used until the connected VTX declares its own table via
+// MSP_SET_VTXTABLE_POWERLEVEL; the index is one based (0 means "unset"), so
+// index 1 == 25mW. 14dBm (25mW), 20dBm (100mW), 26dBm (400mW), 29dBm (800mW)
+static const uint16_t msp_vtx_default_power_mw[] { 25, 100, 400, 800 };
+
+// apply a one-based betaflight power index, leaving power unchanged for 0
+void AP_MSP_Telem_Backend::msp_vtx_set_power_index(uint8_t index)
+{
+    AP_VideoTX& vtx = AP::vtx();
+    // prefer the table the VTX declared for itself, fall back to the default
+    uint16_t mw = vtx.get_power_mw_for_index(index);
+    if (mw == 0 && index >= 1 && index <= ARRAY_SIZE(msp_vtx_default_power_mw)) {
+        mw = msp_vtx_default_power_mw[index - 1];
+    }
+    if (mw > 0) {
+        vtx.set_configured_power_mw(mw);
+    }
+}
+
+// convert the configured power back to the one-based index, 0 if unmatched
+uint8_t AP_MSP_Telem_Backend::msp_vtx_get_power_index() const
+{
+    const AP_VideoTX& vtx = AP::vtx();
+    const uint16_t mw = vtx.get_configured_power_mw();
+    const uint8_t index = vtx.get_power_index_for_mw(mw);
+    if (index > 0) {
+        return index;
+    }
+    for (uint8_t i = 0; i < ARRAY_SIZE(msp_vtx_default_power_mw); i++) {
+        if (mw == msp_vtx_default_power_mw[i]) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+// store a frequency along with the matching band/channel; all setters are
+// set-and-save-if-changed so repeated identical messages cause no flash writes
+void AP_MSP_Telem_Backend::msp_vtx_set_frequency(uint16_t freq_mhz)
+{
+    AP_VideoTX& vtx = AP::vtx();
+    vtx.set_configured_frequency_mhz(freq_mhz);
+    AP_VideoTX::VideoBand band;
+    uint8_t channel;
+    if (AP_VideoTX::get_band_and_channel(freq_mhz, band, channel)) {
+        vtx.set_configured_band(uint8_t(band));
+        vtx.set_configured_channel(channel);
+    }
+}
+
+// store a (zero based) band/channel along with the matching frequency
+void AP_MSP_Telem_Backend::msp_vtx_set_band_and_channel(uint8_t band, uint8_t channel)
+{
+    AP_VideoTX& vtx = AP::vtx();
+    vtx.set_configured_band(band);
+    vtx.set_configured_channel(channel);
+    vtx.set_configured_frequency_mhz(AP_VideoTX::get_frequency_mhz(band, channel));
+}
+
+MSPCommandResult AP_MSP_Telem_Backend::msp_process_in_vtx_config(sbuf_t *src, sbuf_t *dst)
+{
+    AP_VideoTX& vtx = AP::vtx();
+    // the user may have a VTX connected but not want AP to control it
+    // (for instance because they are using myVTX on the transmitter)
+    if (!vtx.get_enabled()) {
+        return MSP_RESULT_ERROR;
+    }
+
+    // MSP_SET_VTX_CONFIG is variable length: clients send anything from the
+    // legacy 4-byte payload up to the full 1.42 message, so every field beyond
+    // the first must be guarded by the remaining byte count (betaflight msp.c)
+    if (sbuf_bytes_remaining(src) < 2) {
+        return MSP_RESULT_ERROR;
+    }
+
+    // the leading u16 is overloaded: values <= VTX_MSP_BANDCHAN_CHKVAL encode
+    // band and channel (band = v/8, channel = v%8, both zero based internally),
+    // larger values are a direct frequency in MHz
+    const uint16_t VTX_MSP_BANDCHAN_CHKVAL = (7 << 3) + 7;
+    const uint16_t freq_or_bandchan = sbuf_read_u16(src);
+    if (freq_or_bandchan <= VTX_MSP_BANDCHAN_CHKVAL) {
+        msp_vtx_set_band_and_channel(freq_or_bandchan / VTX_MAX_CHANNELS, freq_or_bandchan % VTX_MAX_CHANNELS);
+    } else {
+        msp_vtx_set_frequency(freq_or_bandchan);
+    }
+
+    if (sbuf_bytes_remaining(src) >= 2) {
+        msp_vtx_set_power_index(sbuf_read_u8(src));
+        msp_vtx_set_pitmode(sbuf_read_u8(src) != 0);
+    }
+
+    // lowPowerDisarm - not supported, consume to stay aligned
+    if (sbuf_bytes_remaining(src) >= 1) {
+        sbuf_read_u8(src);
+    }
+
+    // API 1.42 - pitModeFreq - not supported, consume to stay aligned
+    if (sbuf_bytes_remaining(src) >= 2) {
+        sbuf_read_u16(src);
+    }
+
+    // API 1.42 - standalone (non-encoded) band/channel/frequency; betaflight
+    // sends band/channel one based with band == 0 meaning "use raw frequency".
+    // When present this supersedes the legacy encoding decoded above.
+    if (sbuf_bytes_remaining(src) >= 4) {
+        const uint8_t band = sbuf_read_u8(src);
+        const uint8_t channel = sbuf_read_u8(src);
+        const uint16_t freq = sbuf_read_u16(src);
+        if (band > 0) {
+            msp_vtx_set_band_and_channel(band - 1, channel > 0 ? channel - 1 : 0);
+        } else {
+            msp_vtx_set_frequency(freq);
+        }
+    }
+
+    vtx.set_provider_enabled(AP_VideoTX::VTXType::MSP);
+    // the VTX has pushed its own config, so the boot handshake is complete and
+    // we may now advertise readiness and push config changes back to it
+    _vtx_config_received = true;
+    // make sure the configured values now reflect reality
+    if (!vtx.set_defaults()) {
+        vtx.announce_vtx_settings();
+    }
+    // seed the push snapshot with the VTX's own values so we only push once the
+    // user actually changes something, not immediately after the handshake
+    _vtx_pushed = {
+        vtx.get_configured_band(),
+        vtx.get_configured_channel(),
+        vtx.get_configured_frequency_mhz(),
+        vtx.get_configured_power_mw(),
+        vtx.get_configured_pitmode(),
+        true
+    };
+    _vtx_config_push_remaining = 0;
+
+    return MSP_RESULT_ACK;
+}
+
+// push the VTX config on change, repeating MSP_VTX_CONFIG_PUSH_COUNT times for
+// delivery robustness. Returns true when the caller should emit a config frame
+// this tick. We only control the VTX after its boot handshake; the air unit
+// does not report its state back, so receipt cannot be confirmed (unlike Tramp)
+bool AP_MSP_Telem_Backend::vtx_should_push_config()
+{
+    AP_VideoTX& vtx = AP::vtx();
+    if (!vtx.get_enabled() || !_vtx_config_received) {
+        return false;
+    }
+
+    const uint8_t band = vtx.get_configured_band();
+    const uint8_t channel = vtx.get_configured_channel();
+    const uint16_t freq_mhz = vtx.get_configured_frequency_mhz();
+    const uint16_t power_mw = vtx.get_configured_power_mw();
+    const bool pitmode = vtx.get_configured_pitmode();
+
+    if (!_vtx_pushed.valid
+        || band != _vtx_pushed.band
+        || channel != _vtx_pushed.channel
+        || freq_mhz != _vtx_pushed.freq_mhz
+        || power_mw != _vtx_pushed.power_mw
+        || pitmode != _vtx_pushed.pitmode) {
+        // configuration changed, (re)start a push burst
+        _vtx_pushed = { band, channel, freq_mhz, power_mw, pitmode, true };
+        _vtx_config_push_remaining = MSP_VTX_CONFIG_PUSH_COUNT;
+        vtx.set_configuration_finished(false);
+    }
+
+    if (_vtx_config_push_remaining == 0) {
+        return false;
+    }
+    if (--_vtx_config_push_remaining == 0) {
+        // optimistically consider the VTX configured once the burst completes
+        vtx.set_configuration_finished(true);
+    }
+    return true;
+}
+
+MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_vtx_config(sbuf_t *src, sbuf_t *dst)
+{
+    AP_VideoTX& vtx = AP::vtx();
+
+    if (!vtx.get_enabled()) {
+        return MSP_RESULT_ERROR;
+    }
+
+    // band/channel are one based on the wire (band == 0 means raw frequency),
+    // zero based internally
+    const uint8_t VTXDEV_MSP = 5;   // betaflight vtxDevType_e
+    struct PACKED {
+        uint8_t type;
+        uint8_t band;
+        uint8_t channel;
+        uint8_t power;
+        uint8_t pitmode;
+        uint16_t freq;
+        uint8_t deviceIsReady;
+        uint8_t lowPowerDisarm;
+        // API version 1.42
+        uint16_t pitModeFreq;
+        uint8_t table;
+        uint8_t table_bands;
+        uint8_t table_channels;
+        uint8_t table_powerLevels;
+    } vtx_config {
+        // band/channel are one based on the wire (band == 0 means raw frequency),
+        // zero based internally. Keep the frequency consistent with band/channel:
+        // the user may change VTX_CHANNEL without VTX_FREQ, and a stale frequency
+        // would contradict the band/channel a betaflight-style VTX keys off
+        .type = VTXDEV_MSP,
+        .band = uint8_t(vtx.get_configured_band() + 1),
+        .channel = uint8_t(vtx.get_configured_channel() + 1),
+        .power = msp_vtx_get_power_index(),
+        .pitmode = vtx.get_configured_pitmode(),
+        .freq = AP_VideoTX::get_frequency_mhz(vtx.get_configured_band(), vtx.get_configured_channel()),
+        // report not-ready until the VTX has uploaded its own config: the HDZero
+        // air unit is the MSP master and only runs that handshake against a
+        // betaflight FC (FC_VARIANT) that is not yet configured. Once it has
+        // pushed its config to us we report ready so it honours our config pushes
+        .deviceIsReady = _vtx_config_received ? uint8_t(1) : uint8_t(0),
+        .table = 0,
+        .table_bands = 0,
+        .table_channels = 0,
+        .table_powerLevels = 0
+    };
+
+    sbuf_write_data(dst, &vtx_config, sizeof(vtx_config));
+    return MSP_RESULT_ACK;
+}
+
+MSPCommandResult AP_MSP_Telem_Backend::msp_process_in_vtxtable_powerlevel(sbuf_t *src, sbuf_t *dst)
+{
+    AP_VideoTX& vtx = AP::vtx();
+    if (!vtx.get_enabled()) {
+        return MSP_RESULT_ERROR;
+    }
+
+    // [u8 powerLevel (one based)][u16 power dBm][u8 label length][label...]; the
+    // index is implied by the dBm ordering and the label is display only, so
+    // both are ignored and only the supported power level is recorded. The value
+    // is dBm (betaflight stores power tables in dBm), not mW; a zero entry is an
+    // unused slot.
+    if (sbuf_bytes_remaining(src) < 3) {
+        return MSP_RESULT_ERROR;
+    }
+    sbuf_read_u8(src);   // power level index, implied by ordering, ignored
+    const uint16_t power_dbm = sbuf_read_u16(src);
+    if (power_dbm > 0) {
+        vtx.update_power_dbm(uint8_t(power_dbm));
+    }
+
+    return MSP_RESULT_ACK;
+}
+
+#endif // AP_MSP_VIDEOTX_ENABLED
 
 MSPCommandResult AP_MSP_Telem_Backend::msp_process_out_board_info(sbuf_t *dst)
 {
@@ -1102,7 +1499,9 @@ void AP_MSP_Telem_Backend::hide_osd_items(void)
     if (msp == nullptr) {
         return;
     }
+#if AP_BATTERY_ENABLED
     const AP_Notify &notify = AP::notify();
+#endif
     // clear all and only set the flashing ones
     BIT_CLEAR(osd_hidden_items_bitmask, OSD_GPS_SATS);
     BIT_CLEAR(osd_hidden_items_bitmask, OSD_HOME_DIR);
@@ -1144,16 +1543,22 @@ void AP_MSP_Telem_Backend::hide_osd_items(void)
         if (msp->_msp_status.flight_mode_focus) {
             BIT_SET(osd_hidden_items_bitmask, OSD_CRAFT_NAME);
         }
+#if AP_BATTERY_ENABLED
         // flash battery on failsafe
         if (notify.flags.failsafe_battery) {
             BIT_SET(osd_hidden_items_bitmask, OSD_AVG_CELL_VOLTAGE);
             BIT_SET(osd_hidden_items_bitmask, OSD_MAIN_BATT_VOLTAGE);
         }
+#endif
         // flash rtc if no time available
+#if AP_RTC_ENABLED
         uint64_t time_usec;
         if (!AP::rtc().get_utc_usec(time_usec)) {
             BIT_SET(osd_hidden_items_bitmask, OSD_RTC_DATETIME);
         }
+#else
+            BIT_SET(osd_hidden_items_bitmask, OSD_RTC_DATETIME);
+#endif
         // flash rssi if disabled
         float rssi;
         if (!get_rssi(rssi)) {
@@ -1207,7 +1612,7 @@ void AP_MSP_Telem_Backend::msp_displayport_draw_screen()
     msp_send_packet(MSP_DISPLAYPORT, MSP::MSP_V1, subcmd, sizeof(subcmd), false);
 }
 
-void AP_MSP_Telem_Backend::msp_displayport_write_string(uint8_t col, uint8_t row, bool blink, const char *string)
+void AP_MSP_Telem_Backend::msp_displayport_write_string(uint8_t col, uint8_t row, bool blink, const char *string, const uint8_t font_table)
 {
     const uint8_t len = strnlen(string, OSD_MSP_DISPLAYPORT_MAX_STRING_LENGTH);
 
@@ -1222,6 +1627,7 @@ void AP_MSP_Telem_Backend::msp_displayport_write_string(uint8_t col, uint8_t row
     packet.sub_cmd = msp_displayport_subcmd_e::MSP_DISPLAYPORT_WRITE_STRING;
     packet.row = row;
     packet.col = col;
+    packet.attr |= (font_table & 0x03); // first 2 bits are for the table index
     if (blink) {
         packet.attr |= DISPLAYPORT_MSP_ATTR_BLINK;
     }
@@ -1255,6 +1661,7 @@ bool AP_MSP_Telem_Backend::displaying_stats_screen() const
 
 bool AP_MSP_Telem_Backend::get_rssi(float &rssi) const
 {
+#if AP_RSSI_ENABLED
     AP_RSSI* ap_rssi = AP::rssi();
     if (ap_rssi == nullptr) {
         return false;
@@ -1264,5 +1671,9 @@ bool AP_MSP_Telem_Backend::get_rssi(float &rssi) const
     }
     rssi =  ap_rssi->read_receiver_rssi(); // range is [0-1]
     return true;
+#else
+    return false;
+#endif
 }
+
 #endif //HAL_MSP_ENABLED

@@ -8,7 +8,13 @@ AP_DAL_InertialSensor::AP_DAL_InertialSensor()
     for (uint8_t i=0; i<ARRAY_SIZE(_RISI); i++) {
         _RISI[i].instance = i;
     }
-
+    // seed RISJ with legacy defaults so replay of older logs (with no
+    // RISJ messages) still gives the EKF sane gyro bias clamp/init values.
+    for (uint8_t i=0; i<ARRAY_SIZE(_RISJ); i++) {
+        _RISJ[i].instance = i;
+        _RISJ[i].gyro_bias_limit = 0.5f;
+        _RISJ[i].gyro_bias_init_dps = 2.5f;
+    }
 }
 
 void AP_DAL_InertialSensor::start_frame()
@@ -18,9 +24,9 @@ void AP_DAL_InertialSensor::start_frame()
     const log_RISH old_RISH = _RISH;
 
     _RISH.loop_rate_hz = ins.get_loop_rate_hz();
-    _RISH.primary_gyro = ins.get_primary_gyro();
+    _RISH.first_usable_gyro = ins.get_first_usable_gyro();
     _RISH.loop_delta_t = ins.get_loop_delta_t();
-    _RISH.primary_accel = ins.get_primary_accel();
+    _RISH.first_usable_accel = ins.get_first_usable_accel();
     _RISH.accel_count = ins.get_accel_count();
     _RISH.gyro_count = ins.get_gyro_count();
     WRITE_REPLAY_BLOCK_IFCHANGED(RISH, _RISH, old_RISH);
@@ -45,6 +51,14 @@ void AP_DAL_InertialSensor::start_frame()
 
         WRITE_REPLAY_BLOCK_IFCHANGED(RISI, RISI, old_RISI);
 
+        // RISJ holds per-instance gyro bias metadata. These are constants
+        // set by the backend, so the message is only written when changed.
+        log_RISJ &RISJ = _RISJ[i];
+        const log_RISJ old_RISJ = RISJ;
+        RISJ.gyro_bias_limit = ins.get_gyro_bias_limit_rads(i);
+        RISJ.gyro_bias_init_dps = ins.get_gyro_bias_init_dps(i);
+        WRITE_REPLAY_BLOCK_IFCHANGED(RISJ, RISJ, old_RISJ);
+
         // update sensor position
         pos[i] = ins.get_imu_pos_offset(i);
     }
@@ -54,9 +68,9 @@ void AP_DAL_InertialSensor::start_frame()
 void AP_DAL_InertialSensor::update_filtered(uint8_t i)
 {
     if (!is_positive(alpha)) {
-        // we use a constant 20Hz for EKF filtered accel/gyro, making the EKF
+        // we use a constant 10Hz for EKF filtered accel/gyro, making the EKF
         // independent of the INS filter settings
-        const float cutoff_hz = 20.0;
+        const float cutoff_hz = 10.0;
         alpha = calc_lowpass_alpha_dt(get_loop_delta_t(), cutoff_hz);
     }
     if (is_positive(_RISI[i].delta_angle_dt)) {

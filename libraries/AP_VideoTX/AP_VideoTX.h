@@ -21,7 +21,7 @@
 #include <AP_Param/AP_Param.h>
 
 #define VTX_MAX_CHANNELS 8
-#define VTX_MAX_POWER_LEVELS 9
+#define VTX_MAX_POWER_LEVELS 10
 
 class AP_VideoTX {
 public:
@@ -62,6 +62,11 @@ public:
         FATSHARK,
         RACEBAND,
         LOW_RACEBAND,
+        BAND_1G3_A,
+        BAND_1G3_B,
+        BAND_X,
+        BAND_3G3_A,
+        BAND_3G3_B,
         MAX_BANDS
     };
 
@@ -69,6 +74,13 @@ public:
         Unknown,
         Active,
         Inactive
+    };
+
+    enum VTXType {
+        CRSF       = 1U<<0,
+        SmartAudio = 1U<<1,
+        Tramp      = 1U<<2,
+        MSP        = 1U<<3
     };
 
     struct PowerLevel {
@@ -103,6 +115,10 @@ public:
     void set_configured_power_mw(uint16_t power);
     uint16_t get_configured_power_mw() const { return _power_mw; }
     uint16_t get_power_mw() const { return _power_levels[_current_power].mw; }
+    // VTX-reported actual power; -1 if the provider doesn't report it, 0 is pit mode
+    void set_actual_power_mw(uint16_t power) { _actual_power_mw = int32_t(power); }
+    int32_t get_actual_power_mw() const { return _actual_power_mw; }
+    uint16_t get_max_power_mw() const { return _max_power_mw; }
 
     // get the power in dbm, rounding appropriately
     uint8_t get_configured_power_dbm() const {
@@ -116,6 +132,17 @@ public:
     uint8_t get_configured_power_dac() const {
         return _power_levels[find_current_power()].dac;
     }
+
+    // mark the power level matching the given mW as supported, learning it
+    // into the custom slot if it is not a standard value
+    void update_power_mw(uint16_t power_mw, PowerActive active = PowerActive::Active);
+    // a provider's power index is one based and refers to the supported (active)
+    // levels in ascending order, so index 1 is the lowest supported level
+    uint8_t get_num_power_levels() const;
+    // mW for a one based power index, 0 if not known
+    uint16_t get_power_mw_for_index(uint8_t index) const;
+    // one based power index for a mW value, 0 if not matched
+    uint8_t get_power_index_for_mw(uint16_t power_mw) const;
 
     bool update_power() const;
     // change the video power based on switch input
@@ -139,6 +166,11 @@ public:
     uint16_t get_configured_options() const { return _options; }
     uint16_t get_options() const { return _current_options; }
     bool has_option(VideoOptions option) const { return _options.get() & uint16_t(option); }
+    // set or clear a single configured option bit, leaving the others untouched
+    void set_option_enabled(VideoOptions option, bool enabled) {
+        set_configured_options(enabled ? (get_configured_options() | uint16_t(option))
+                                       : (get_configured_options() & ~uint16_t(option)));
+    }
     bool get_configured_pitmode() const { return _options.get() & uint8_t(AP_VideoTX::VideoOptions::VTX_PITMODE); }
     bool get_pitmode() const { return _current_options & uint8_t(AP_VideoTX::VideoOptions::VTX_PITMODE); }
     bool update_options() const;
@@ -161,6 +193,13 @@ public:
     void set_configuration_finished(bool configuration_finished) { _configuration_finished = configuration_finished; }
     bool is_configuration_finished() { return _configuration_finished; }
 
+    // manage VTX backends
+    bool is_provider_enabled(VTXType type) const { return (_types & type) != 0; }
+    // a provider may only register if the user allows its type (VTX_TYPES)
+    void set_provider_enabled(VTXType type) { if (is_type_enabled(type)) { _types |= type; } }
+    // is this control transport allowed to manage the VTX
+    bool is_type_enabled(VTXType type) const { return (uint8_t(_types_allowed) & uint8_t(type)) != 0; }
+
     static AP_VideoTX *singleton;
 
 private:
@@ -172,6 +211,7 @@ private:
     // power output in mw
     AP_Int16 _power_mw;
     uint16_t _current_power;
+    int32_t _actual_power_mw {-1};
     AP_Int16 _max_power_mw;
 
     // frequency band
@@ -189,11 +229,17 @@ private:
     AP_Int8 _enabled;
     bool _current_enabled;
 
+    // bitmask of VTXType control transports the user permits (VTX_TYPES)
+    AP_Int8 _types_allowed;
+
     bool _initialized;
     // when defaults have been configured
     bool _defaults_set;
     // true when configuration have been applied successfully to the VTX
     bool _configuration_finished;
+
+    // types of VTX providers
+    uint8_t _types;
 };
 
 namespace AP {

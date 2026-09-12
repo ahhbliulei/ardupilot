@@ -3,6 +3,7 @@
 #include <AP_Arming/AP_Arming.h>
 #include <AP_WheelEncoder/AP_WheelRateControl.h>
 #include <SRV_Channel/SRV_Channel.h>
+#include <AP_BattMonitor/AP_BattMonitor_config.h>
 
 class AP_MotorsUGV {
 public:
@@ -27,6 +28,7 @@ public:
         FRAME_TYPE_OMNI3 = 1,
         FRAME_TYPE_OMNIX = 2,
         FRAME_TYPE_OMNIPLUS = 3,
+        FRAME_TYPE_OMNI3MECANUM = 4,
     };
 
     // initialise motors
@@ -114,6 +116,9 @@ public:
     // returns true if the vehicle is omni
     bool is_omni() const { return _frame_type != FRAME_TYPE_UNDEFINED && _motors_num > 0; }
 
+    // Return the relay index that would be used for param conversion to relay functions
+    bool get_legacy_relay_index(int8_t &index1, int8_t &index2, int8_t &index3, int8_t &index4) const;
+
     // structure for holding motor limit flags
     struct AP_MotorsUGV_limit {
         uint8_t steer_left      : 1; // we have reached the steering controller's left most limit
@@ -127,16 +132,16 @@ public:
 
 private:
 
-    enum pwm_type {
-        PWM_TYPE_NORMAL = 0,
-        PWM_TYPE_ONESHOT = 1,
-        PWM_TYPE_ONESHOT125 = 2,
-        PWM_TYPE_BRUSHED_WITH_RELAY = 3,
-        PWM_TYPE_BRUSHED_BIPOLAR = 4,
-        PWM_TYPE_DSHOT150 = 5,
-        PWM_TYPE_DSHOT300 = 6,
-        PWM_TYPE_DSHOT600 = 7,
-        PWM_TYPE_DSHOT1200 = 8
+    enum PWMType {
+        NORMAL = 0,
+        ONESHOT = 1,
+        ONESHOT125 = 2,
+        BRUSHED_WITH_RELAY = 3,
+        BRUSHED_BIPOLAR = 4,
+        DSHOT150 = 5,
+        DSHOT300 = 6,
+        DSHOT600 = 7,
+        DSHOT1200 = 8
     };
 
     // sanity check parameters
@@ -168,7 +173,7 @@ private:
 
     // output throttle (-100 ~ +100) to a throttle channel.  Sets relays if required
     // dt is the main loop time interval and is required when rate control is required
-    void output_throttle(SRV_Channel::Aux_servo_function_t function, float throttle, float dt = 0.0f);
+    void output_throttle(SRV_Channel::Function function, float throttle, float dt = 0.0f);
 
     // output for sailboat's mainsail in the range of 0 to 100 and wing sail in the range +- 100
     void output_sail();
@@ -179,6 +184,11 @@ private:
     // slew limit throttle for one iteration
     void slew_limit_throttle(float dt);
 
+    // apply power limiting to throttle for one iteration
+#if AP_BATTERY_WATT_MAX_ENABLED
+    void power_limit_throttle(float dt);
+#endif
+
     // set limits based on steering and throttle input
     void set_limits_from_input(bool armed, float steering, float throttle);
 
@@ -186,7 +196,10 @@ private:
     float get_scaled_throttle(float throttle) const;
 
     // use rate controller to achieve desired throttle
-    float get_rate_controlled_throttle(SRV_Channel::Aux_servo_function_t function, float throttle, float dt);
+    float get_rate_controlled_throttle(SRV_Channel::Function function, float throttle, float dt);
+
+    // return power_limit as a number from 0 ~ 1 in the range throttle_min to throttle_max
+    float get_power_limit_max_throttle(float dt);
 
     // external references
     AP_WheelRateControl &_rate_controller;
@@ -201,14 +214,18 @@ private:
     AP_Int8 _throttle_min; // throttle minimum percentage
     AP_Int8 _throttle_max; // throttle maximum percentage
     AP_Float _thrust_curve_expo; // thrust curve exponent from -1 to +1 with 0 being linear
+    AP_Float _thrust_asymmetry; // asymmetry factor, how much better your skid-steering motors are at going forward than backwards (forward/backward thrust ratio)
     AP_Float _vector_angle_max;  // angle between steering's middle position and maximum position when using vectored thrust.  zero to disable vectored thrust
     AP_Float _speed_scale_base;  // speed above which steering is scaled down when using regular steering/throttle vehicles.  zero to disable speed scaling
     AP_Float _steering_throttle_mix; // Steering vs Throttle priorisation.  Higher numbers prioritise steering, lower numbers prioritise throttle.  Only valid for Skid Steering vehicles
+    AP_Float _reverse_delay; // delay in seconds when reversing motor
+    AP_Float _batt_power_time_constant;    // Time constant used to limit the battery power
 
     // internal variables
     float   _steering;  // requested steering as a value from -4500 to +4500
     float   _throttle;  // requested throttle as a value from -100 to 100
     float   _throttle_prev; // throttle input from previous iteration
+    float   _throttle_limit = 1.0f;  // used for current limiting
     bool    _scale_steering = true; // true if we should scale steering by speed or angle
     float   _lateral;  // requested lateral input as a value from -100 to +100
     float   _roll;      // requested roll as a value from -1 to +1
@@ -225,6 +242,17 @@ private:
     float   _steering_factor[AP_MOTORS_NUM_MOTORS_MAX];
     float   _lateral_factor[AP_MOTORS_NUM_MOTORS_MAX];
     uint8_t   _motors_num;
+
+    /*
+      3 reversal handling structures, for k_throttle, k_throttleLeft and k_throttleRight
+     */
+    struct ReverseThrottle {
+        float last_throttle;
+        uint32_t last_output_ms;
+
+        // output with delay for reversal
+        void output(SRV_Channel::Function function, float throttle, float delay);
+    } rev_delay_throttle, rev_delay_throttleLeft, rev_delay_throttleRight;
 
     static AP_MotorsUGV *_singleton;
 };

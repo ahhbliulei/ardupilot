@@ -13,18 +13,22 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <AP_Common/Location.h>
+#include "AP_Rally.h"
+
+#if HAL_RALLY_ENABLED
 
 #include "Rover.h"
 
-#include "AP_Rally.h"
+#include <AP_Common/Location.h>
 
 bool AP_Rally_Rover::is_valid(const Location &rally_point) const
 {
 #if AP_FENCE_ENABLED
-    if (!rover.fence.check_destination_within_fence(rally_point)) {
+    if (!rover.fence.check_location_within_fence(rally_point)) {
         return false;
     }
 #endif
     return true;
 }
+
+#endif  // HAL_RALLY_ENABLED

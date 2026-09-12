@@ -13,12 +13,17 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "AP_GPS_config.h"
+
+#if AP_GPS_ENABLED
+
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 #include <AP_Logger/AP_Logger.h>
 #include <time.h>
 #include <AP_Common/time.h>
 #include <AP_InternalError/AP_InternalError.h>
+#include <AP_AHRS/AP_AHRS.h>
 
 #define GPS_BACKEND_DEBUGGING 0
 
@@ -36,52 +41,29 @@
 
 extern const AP_HAL::HAL& hal;
 
-AP_GPS_Backend::AP_GPS_Backend(AP_GPS &_gps, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port) :
+AP_GPS_Backend::AP_GPS_Backend(AP_GPS &_gps, AP_GPS::Params &_params, AP_GPS::GPS_State &_state, AP_HAL::UARTDriver *_port) :
     port(_port),
     gps(_gps),
-    state(_state)
+    state(_state),
+    params(_params)
 {
     state.have_speed_accuracy = false;
     state.have_horizontal_accuracy = false;
     state.have_vertical_accuracy = false;
 }
 
-int32_t AP_GPS_Backend::swap_int32(int32_t v) const
-{
-    const uint8_t *b = (const uint8_t *)&v;
-    union {
-        int32_t v;
-        uint8_t b[4];
-    } u;
-
-    u.b[0] = b[3];
-    u.b[1] = b[2];
-    u.b[2] = b[1];
-    u.b[3] = b[0];
-
-    return u.v;
-}
-
-int16_t AP_GPS_Backend::swap_int16(int16_t v) const
-{
-    const uint8_t *b = (const uint8_t *)&v;
-    union {
-        int16_t v;
-        uint8_t b[2];
-    } u;
-
-    u.b[0] = b[1];
-    u.b[1] = b[0];
-
-    return u.v;
-}
-
-
-/**
-   fill in time_week_ms and time_week from BCD date and time components
-   assumes MTK19 millisecond form of bcd_time
+/*
+  get the last time of week in ms
  */
-void AP_GPS_Backend::make_gps_time(uint32_t bcd_date, uint32_t bcd_milliseconds)
+uint32_t AP_GPS_Backend::get_last_itow_ms(void) const
+{
+    if (!_have_itow) {
+        return state.time_week_ms;
+    }
+    return (_pseudo_itow_delta_ms == 0)?(_last_itow_ms):((_pseudo_itow/1000ULL) + _pseudo_itow_delta_ms);
+}
+
+void AP_GPS_Backend::BCD_to_gps_time(uint32_t bcd_date, uint32_t bcd_time_ms, uint16_t& gps_week, uint32_t& gps_time_ms)
 {
     struct tm tm {};
 
@@ -89,7 +71,7 @@ void AP_GPS_Backend::make_gps_time(uint32_t bcd_date, uint32_t bcd_milliseconds)
     tm.tm_mon  = ((bcd_date / 100U) % 100U)-1;
     tm.tm_mday = bcd_date / 10000U;
 
-    uint32_t v = bcd_milliseconds;
+    uint32_t v = bcd_time_ms;
     uint16_t msec = v % 1000U; v /= 1000U;
     tm.tm_sec = v % 100U; v /= 100U;
     tm.tm_min = v % 100U; v /= 100U;
@@ -104,20 +86,9 @@ void AP_GPS_Backend::make_gps_time(uint32_t bcd_date, uint32_t bcd_milliseconds)
     uint32_t ret = unix_time + leap_seconds_unix - unix_to_GPS_secs;
 
     // get GPS week and time
-    state.time_week = ret / AP_SEC_PER_WEEK;
-    state.time_week_ms = (ret % AP_SEC_PER_WEEK) * AP_MSEC_PER_SEC;
-    state.time_week_ms += msec;
-}
-
-/*
-  get the last time of week in ms
- */
-uint32_t AP_GPS_Backend::get_last_itow_ms(void) const
-{
-    if (!_have_itow) {
-        return state.time_week_ms;
-    }
-    return (_pseudo_itow_delta_ms == 0)?(_last_itow_ms):((_pseudo_itow/1000ULL) + _pseudo_itow_delta_ms);
+    gps_week = ret / AP_SEC_PER_WEEK;
+    gps_time_ms = (ret % AP_SEC_PER_WEEK) * AP_MSEC_PER_SEC;
+    gps_time_ms += msec;
 }
 
 /*
@@ -162,10 +133,10 @@ void AP_GPS_Backend::_detection_message(char *buffer, const uint8_t buflen) cons
 
     if (dstate.auto_detected_baud) {
         hal.util->snprintf(buffer, buflen,
-                 "GPS %d: detected as %s at %d baud",
+                 "GPS %d: probing for %s at %d baud",
                  instance + 1,
                  name(),
-                 int(gps._baudrates[dstate.current_baud]));
+                 int(dstate.probe_baud));
     } else {
         hal.util->snprintf(buffer, buflen,
                  "GPS %d: specified as %s",
@@ -182,24 +153,24 @@ void AP_GPS_Backend::broadcast_gps_type() const
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "%s", buffer);
 }
 
+#if HAL_LOGGING_ENABLED
 void AP_GPS_Backend::Write_AP_Logger_Log_Startup_messages() const
 {
-#if HAL_LOGGING_ENABLED
     char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
     _detection_message(buffer, sizeof(buffer));
     AP::logger().Write_Message(buffer);
-#endif
 }
 
 bool AP_GPS_Backend::should_log() const
 {
     return gps.should_log();
 }
+#endif
 
 
+#if AP_GPS_GPS_RTK_SENDING_ENABLED || AP_GPS_GPS2_RTK_SENDING_ENABLED
 void AP_GPS_Backend::send_mavlink_gps_rtk(mavlink_channel_t chan)
 {
-#if HAL_GCS_ENABLED
     const uint8_t instance = state.instance;
     // send status
     switch (instance) {
@@ -236,8 +207,9 @@ void AP_GPS_Backend::send_mavlink_gps_rtk(mavlink_channel_t chan)
                                  state.rtk_iar_num_hypotheses);
             break;
     }
-#endif
 }
+#endif  // AP_GPS_GPS_RTK_SENDING_ENABLED || AP_GPS_GPS2_RTK_SENDING_ENABLED
+
 
 
 /*
@@ -271,7 +243,7 @@ void AP_GPS_Backend::check_new_itow(uint32_t itow, uint32_t msg_length)
 
         // get the time the packet arrived on the UART
         uint64_t uart_us;
-        if (_last_pps_time_us != 0 && (state.status >= AP_GPS::GPS_OK_FIX_2D)) {
+        if (_last_pps_time_us != 0 && (state.status >= AP_GPS_FixType::FIX_2D)) {
             // pps is only reliable when we have some sort of GPS fix
             uart_us = _last_pps_time_us;
             _last_pps_time_us = 0;
@@ -337,7 +309,7 @@ void AP_GPS_Backend::check_new_itow(uint32_t itow, uint32_t msg_length)
         }
 #endif // HAL_BUILD_AP_PERIPH
 
-        if (state.status >= AP_GPS::GPS_OK_FIX_2D) {
+        if (state.status >= AP_GPS_FixType::FIX_2D) {
             // we must have a decent fix to calculate difference between itow and pseudo-itow
             _pseudo_itow_delta_ms = itow - (_pseudo_itow/1000ULL);
         }
@@ -350,18 +322,21 @@ bool AP_GPS_Backend::calculate_moving_base_yaw(float reported_heading_deg, const
 }
 
 bool AP_GPS_Backend::calculate_moving_base_yaw(AP_GPS::GPS_State &interim_state, const float reported_heading_deg, const float reported_distance, const float reported_D) {
-    constexpr float minimum_antenna_seperation = 0.05; // meters
+    constexpr float minimum_antenna_separation = AP_GPS_MB_MIN_ANTENNA_SEPARATION_M;
     constexpr float permitted_error_length_pct = 0.2;  // percentage
-
+#if HAL_LOGGING_ENABLED || AP_AHRS_ENABLED
+    float min_D = 0.0f;
+    float max_D = 0.0f;
+#endif
     bool selectedOffset = false;
     Vector3f offset;
-    switch (MovingBase::Type(gps.mb_params[interim_state.instance].type.get())) {
+    switch (MovingBase::Type(gps.params[interim_state.instance].mb_params.type)) {
         case MovingBase::Type::RelativeToAlternateInstance:
-            offset = gps._antenna_offset[interim_state.instance^1].get() - gps._antenna_offset[interim_state.instance].get();
+            offset = gps.params[interim_state.instance^1].antenna_offset.get() - gps.params[interim_state.instance].antenna_offset.get();
             selectedOffset = true;
             break;
         case MovingBase::Type::RelativeToCustomBase:
-            offset = gps.mb_params[interim_state.instance].base_offset.get();
+            offset = gps.params[interim_state.instance].mb_params.base_offset.get();
             selectedOffset = true;
             break;
     }
@@ -376,33 +351,44 @@ bool AP_GPS_Backend::calculate_moving_base_yaw(AP_GPS::GPS_State &interim_state,
         const float offset_dist = offset.length();
         const float min_dist = MIN(offset_dist, reported_distance);
 
-        if (offset_dist < minimum_antenna_seperation) {
-            // offsets have to be sufficently large to get a meaningful angle off of them
+        if (offset_dist < minimum_antenna_separation) {
+            // offsets have to be sufficiently large to get a meaningful angle off of them
             Debug("Insufficent antenna offset (%f, %f, %f)", (double)offset.x, (double)offset.y, (double)offset.z);
             goto bad_yaw;
         }
 
-        if (reported_distance < minimum_antenna_seperation) {
-            // if the reported distance is less then the minimum seperation it's not sufficently robust
-            Debug("Reported baseline distance (%f) was less then the minimum antenna seperation (%f)",
-                  (double)reported_distance, (double)minimum_antenna_seperation);
+        if (reported_distance < minimum_antenna_separation) {
+            // if the reported distance is less then the minimum separation it's not sufficiently robust
+            Debug("Reported baseline distance (%f) was less then the minimum antenna separation (%f)",
+                  (double)reported_distance, (double)minimum_antenna_separation);
             goto bad_yaw;
         }
 
 
-        if ((offset_dist - reported_distance) > (min_dist * permitted_error_length_pct)) {
+        if (fabsf(offset_dist - reported_distance) > (min_dist * permitted_error_length_pct)) {
             // the magnitude of the vector is much further then we were expecting
-            Debug("Exceeded the permitted error margin %f > %f",
-                  (double)(offset_dist - reported_distance), (double)(min_dist * permitted_error_length_pct));
+            Debug("Offset=%.2f vs reported-distance=%.2f (max-delta=%.2f)",
+                  offset_dist, reported_distance, (double)(min_dist * permitted_error_length_pct));
             goto bad_yaw;
+        }
+
+        {
+            // the reported heading is the bearing of the baseline in the horizontal
+            // plane, so its noise scales inversely with the horizontal separation of
+            // the antennas. A baseline close to vertical carries no usable yaw
+            // information regardless of the antenna separation, whether because of
+            // a vertical antenna installation or because vehicle attitude has
+            // rotated the baseline close to vertical
+            const float reported_horizontal_sq = sq(reported_distance) - sq(reported_D);
+            if (reported_horizontal_sq < sq(minimum_antenna_separation)) {
+                Debug("Insufficient horizontal separation %.2f of reported baseline (dist=%.2f, D=%.2f)",
+                      (double)safe_sqrt(reported_horizontal_sq), (double)reported_distance, (double)reported_D);
+                goto bad_yaw;
+            }
         }
 
 #if AP_AHRS_ENABLED
         {
-            // get lag
-            float lag = 0.1;
-            get_lag(lag);
-
             // get vehicle rotation, projected back in time using the gyro
             // this is not 100% accurate, but it is good enough for
             // this test. To do it completely accurately we'd need an
@@ -411,17 +397,21 @@ bool AP_GPS_Backend::calculate_moving_base_yaw(AP_GPS::GPS_State &interim_state,
             // for this use case
             const auto &ahrs = AP::ahrs();
             const Vector3f &gyro = ahrs.get_gyro();
-            Matrix3f rot_body_to_ned = ahrs.get_rotation_body_to_ned();
-            rot_body_to_ned.rotate(gyro * (-lag));
+            Matrix3f rot_body_to_ned_min_lag = ahrs.get_rotation_body_to_ned();
+            rot_body_to_ned_min_lag.rotate(gyro * -AP_GPS_MB_MIN_LAG);
+            Matrix3f rot_body_to_ned_max_lag = ahrs.get_rotation_body_to_ned();
+            rot_body_to_ned_max_lag.rotate(gyro * -AP_GPS_MB_MAX_LAG);
 
             // apply rotation to the offset to get the Z offset in NED
-            const Vector3f antenna_tilt = rot_body_to_ned * offset;
-            const float alt_error = reported_D + antenna_tilt.z;
-
-            if (fabsf(alt_error) > permitted_error_length_pct * min_dist) {
+            const Vector3f antenna_tilt_min_lag = rot_body_to_ned_min_lag * offset;
+            const Vector3f antenna_tilt_max_lag = rot_body_to_ned_max_lag * offset;
+            min_D = MIN(-antenna_tilt_min_lag.z, -antenna_tilt_max_lag.z);
+            max_D = MAX(-antenna_tilt_min_lag.z, -antenna_tilt_max_lag.z);
+            min_D -= permitted_error_length_pct * min_dist;
+            max_D += permitted_error_length_pct * min_dist;
+            if (reported_D < min_D || reported_D > max_D) {
                 // the vertical component is out of range, reject it
-                Debug("bad alt_err %.1f > %.1f\n",
-                      alt_error, permitted_error_length_pct * min_dist);
+                Debug("bad alt_err %f < %f < %f", (double)min_D, (double)reported_D, (double)max_D);
                 goto bad_yaw;
             }
         }
@@ -429,16 +419,25 @@ bool AP_GPS_Backend::calculate_moving_base_yaw(AP_GPS::GPS_State &interim_state,
 
         {
             // at this point the offsets are looking okay, go ahead and actually calculate a useful heading
+            // the bearing of the offset is only exact when the vehicle is level; the
+            // offset is exported in mb_yaw_offset so consumers with an attitude
+            // estimate can correct the yaw for vehicle roll and pitch
             const float rotation_offset_rad = Vector2f(-offset.x, -offset.y).angle();
             interim_state.gps_yaw = wrap_360(reported_heading_deg - degrees(rotation_offset_rad));
             interim_state.have_gps_yaw = true;
             interim_state.gps_yaw_time_ms = AP_HAL::millis();
+#if AP_GPS_MB_YAW_OFFSET_ENABLED
+            interim_state.mb_yaw_offset = offset;
+#endif
         }
         goto good_yaw;
     }
 
 bad_yaw:
     interim_state.have_gps_yaw = false;
+#if AP_GPS_MB_YAW_OFFSET_ENABLED
+    interim_state.mb_yaw_offset.zero();
+#endif
 
 good_yaw:
 
@@ -451,22 +450,41 @@ good_yaw:
     // @Field: RHD: reported heading,deg
     // @Field: RDist: antenna separation,m
     // @Field: RDown: vertical antenna separation,m
+    // @Field: MinCDown: minimum tolerable vertical antenna separation,m
+    // @Field: MaxCDown: maximum tolerable vertical antenna separation,m 
     // @Field: OK: 1 if have yaw
-    AP::logger().WriteStreaming("GPYW", "TimeUS,Id,RHD,RDist,RDown,OK",
-                                "s#dmm-",
-                                "F-----",
-                                "QBfffB",
+    AP::logger().WriteStreaming("GPYW", "TimeUS,Id,RHD,RDist,RDown,MinCDown,MaxCDown,OK",
+                                "s#dmmmm-",
+                                "F-------",
+                                "QBfffffB",
                                 AP_HAL::micros64(),
                                 state.instance,
                                 reported_heading_deg,
                                 reported_distance,
                                 reported_D,
+                                min_D,
+                                max_D,
                                 interim_state.have_gps_yaw);
 #endif
 
     return interim_state.have_gps_yaw;
 }
 #endif // GPS_MOVING_BASELINE
+
+/*
+  set altitude in location structure, honouring the driver option for
+  MSL vs ellipsoid height
+ */
+void AP_GPS_Backend::set_alt_amsl_cm(AP_GPS::GPS_State &_state, int32_t alt_amsl_cm)
+{
+    if (option_set(AP_GPS::HeightEllipsoid) && _state.have_undulation) {
+        // user has asked ArduPilot to use ellipsoid height in the
+        // canonical height for mission and navigation
+        _state.location.alt = alt_amsl_cm - _state.undulation*100;
+    } else {
+        _state.location.alt = alt_amsl_cm;
+    }
+}
 
 #if AP_GPS_DEBUG_LOGGING_ENABLED
 
@@ -540,3 +558,5 @@ void AP_GPS_Backend::logging_start(void)
     logging_loop();
 }
 #endif // AP_GPS_DEBUG_LOGGING_ENABLED
+
+#endif  // AP_GPS_ENABLED

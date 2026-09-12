@@ -43,7 +43,10 @@ void AP_Frsky_SPort::send(void)
     }
 
     for (int16_t i = 0; i < numc; i++) {
-        int16_t readbyte = _port->read();
+        uint8_t readbyte;
+        if (!_port->read(readbyte)) {
+            break;
+        }
         if (_SPort.sport_status == false) {
             if  (readbyte == FRAME_HEAD) {
                 _SPort.sport_status = true;
@@ -140,7 +143,7 @@ void AP_Frsky_SPort::send(void)
             case SENSOR_ID_SP2UR: // Sensor ID  6
                 switch (_SPort.various_call) {
                 case 0 :
-                    send_sport_frame(SPORT_DATA_FRAME, TEMP2_ID, (uint16_t)(AP::gps().num_sats() * 10 + AP::gps().status())); // send GPS status and number of satellites as num_sats*10 + status (to fit into a uint8_t)
+                    send_sport_frame(SPORT_DATA_FRAME, TEMP2_ID, (uint16_t)(AP::gps().num_sats() * 10 + (uint8_t)AP::gps().status())); // send GPS status and number of satellites as num_sats*10 + status (to fit into a uint8_t)
                     break;
                 case 1:
                     send_sport_frame(SPORT_DATA_FRAME, TEMP1_ID, gcs().custom_mode()); // send flight mode
@@ -369,6 +372,7 @@ bool AP_Frsky_SPortParser::get_packet(AP_Frsky_SPort::sport_packet_t &sport_pack
         0x1B	// Physical ID 27 - ArduPilot/Betaflight DEFAULT DOWNLINK
  * for FrSky SPort Passthrough (OpenTX) protocol (X-receivers)
  */
+#undef BIT
 #define BIT(x, index) (((x) >> index) & 0x01)
 uint8_t AP_Frsky_SPort::calc_sensor_id(const uint8_t physical_id)
 {

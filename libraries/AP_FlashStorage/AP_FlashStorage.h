@@ -40,7 +40,7 @@
 #include <AP_HAL/AP_HAL.h>
 
 /*
-  we support 3 different types of flash which have different restrictions
+  we support 4 different types of flash which have different restrictions
  */
 #define AP_FLASHSTORAGE_TYPE_F1  1 // F1 and F3
 #define AP_FLASHSTORAGE_TYPE_F4  2 // F4 and F7
@@ -66,7 +66,7 @@
 #define AP_FLASHSTORAGE_TYPE AP_FLASHSTORAGE_TYPE_G4
 #else // F4, F7
 /*
-  STM32HF4 and STM32H7 can update bits from 1 to 0
+  STM32F4 and STM32F7 can update bits from 1 to 0
  */
 #define AP_FLASHSTORAGE_TYPE AP_FLASHSTORAGE_TYPE_F4
 #endif
@@ -236,7 +236,7 @@ private:
     bool switch_sectors(void) WARN_IF_UNUSED;
 
     // _switch_full_sector is protected by switch_full_sector to avoid
-    // an infinite recursion problem; switch_full_sectory calls
+    // an infinite recursion problem; switch_full_sector calls
     // write() which can call switch_full_sector.  This has been seen
     // in practice.
     bool protected_switch_full_sector(void) WARN_IF_UNUSED;

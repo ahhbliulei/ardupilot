@@ -7,11 +7,11 @@
 #include <AP_AHRS/AP_AHRS.h>
 #include <GCS_MAVLink/GCS.h>
 
-static const float MAX_POS_ERROR_M = 0.75f;  // Maximum possition error for retry locations
+static const float MAX_POS_ERROR_M = 0.75f;  // Maximum position error for retry locations
 static const uint32_t FAILSAFE_INIT_TIMEOUT_MS = 7000;   // Timeout in ms before failsafe measures are started. During this period vehicle is completely stopped to give user the time to take over
 static const float RETRY_OFFSET_ALT_M = 1.5f;  // This gets added to the altitude of the retry location
 
-// Initialize the state machine. This is called everytime vehicle switches mode
+// Initialize the state machine. This is called every time vehicle switches mode
 void AC_PrecLand_StateMachine::init()
 {
     AC_PrecLand *_precland = AP::ac_precland();
@@ -24,14 +24,14 @@ void AC_PrecLand_StateMachine::init()
         // precland is not enabled, prec land state machine methods should not be called!
         return;
     }
-    // init is only called ONCE per mode change. So in a particuar mode we can retry only a finite times.
+    // init is only called ONCE per mode change. So in a particular mode we can retry only a finite times.
     // The counter will be reset if the statemachine is called from a different mode
     _retry_count = 0;
     // reset every other statemachine
     reset_failed_landing_statemachine();
 }
 
-// Reset the landing statemachines. This needs to be called everytime the landing target is back in sight.
+// Reset the landing statemachines. This needs to be called every time the landing target is back in sight.
 // So that if the landing target goes out of sight again, we can start the failed landing procedure back from the beginning stage
 void AC_PrecLand_StateMachine::reset_failed_landing_statemachine()
 {
@@ -46,7 +46,7 @@ void AC_PrecLand_StateMachine::reset_failed_landing_statemachine()
 // This method deals with all of these scenarios
 // Returns the action needed to be done by the vehicle.
 // Parameters: Vector3f "retry_pos_m" is filled with the required location if we need to retry landing.
-AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::update(Vector3f &retry_pos_m)
+AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::update(Vector3p &retry_pos_m)
 {
 
     // grab the current status of Landing Target
@@ -91,7 +91,7 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::update(Vector3f &retr
 // Target is lost (i.e we had it in sight some time back), this method helps decide on what needs to be done next
 // The chosen action depends on user set landing strictness and will be returned by this function
 // Parameters: Vector3f "retry_pos_m" is filled with the required location if we need to retry landing.
-AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::get_target_lost_actions(Vector3f &retry_pos_m)
+AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::get_target_lost_actions(Vector3p &retry_pos_m)
 {
     AC_PrecLand *_precland = AP::ac_precland();
     if (_precland == nullptr) {
@@ -147,7 +147,7 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::get_target_lost_actio
 // Retry landing based on a previously known location of the landing target
 // Returns the action that should be taken by the vehicle
 // Vector3f "retry_pos_m" is filled with the required location.
-AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3f &retry_pos_m)
+AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3p &retry_pos_m)
 {
     AC_PrecLand *_precland = AP::ac_precland();
     if (_precland == nullptr) {
@@ -167,12 +167,12 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3
     }
 
     // get the retry position. This depends on what retry behavior has been set by user
-    Vector3f go_to_pos;
+    Vector3p go_to_pos;
     const RetryAction retry_action = _precland->get_retry_behaviour();
     if (retry_action == RetryAction::GO_TO_TARGET_LOC) {
-        _precland->get_last_detected_landing_pos(go_to_pos);
+        _precland->get_last_detected_landing_pos_NED_m(go_to_pos);
     } else if (retry_action == RetryAction::GO_TO_LAST_LOC) {
-        _precland->get_last_vehicle_pos_when_target_detected(go_to_pos);
+        _precland->get_last_vehicle_pos_when_target_detected_NED_m(go_to_pos);
     }
 
     // add a little bit offset so the vehicle climbs slightly higher than where it was
@@ -186,7 +186,7 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3
         _retry_state = RetryLanding::IN_PROGRESS;
         // inform the user what we are doing
         if (_retry_count <= _precland->get_max_retry_allowed()) {
-            gcs().send_text(MAV_SEVERITY_INFO, "PrecLand: Retrying");
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PrecLand: Retrying");
         }
         retry_pos_m = go_to_pos;
         return Status::RETRYING;
@@ -194,7 +194,7 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3
     case RetryLanding::IN_PROGRESS: {
         // continue converging towards the target till we are close by
         retry_pos_m = go_to_pos;
-        Vector3f pos;
+        Vector3p pos;
         if (!AP::ahrs().get_relative_position_NED_origin(pos)) {
             return Status::ERROR;
         }
@@ -209,17 +209,17 @@ AC_PrecLand_StateMachine::Status AC_PrecLand_StateMachine::retry_landing(Vector3
     case RetryLanding::DESCEND: {
         // descend a little bit before completing the retry
         // This will descend to the original height of where landing target was first detected
-        Vector3f pos;
+        Vector3p pos;
         if (!AP::ahrs().get_relative_position_NED_origin(pos)) {
             return Status::ERROR;
         }
         // z_target is in "D" frame
         const float z_target = go_to_pos.z + RETRY_OFFSET_ALT_M;
-        retry_pos_m = Vector3f{pos.x, pos.y, z_target};
+        retry_pos_m = Vector3p{pos.x, pos.y, z_target};
         if (fabsf(pos.z - retry_pos_m.z) < MAX_POS_ERROR_M) {
             // we have descended to the original height where we started the climb from
             _retry_state = RetryLanding::COMPLETE;
-            gcs().send_text(MAV_SEVERITY_INFO, "PrecLand: Retry Completed");
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PrecLand: Retry Completed");
         }
         return Status::RETRYING;
     }
@@ -249,7 +249,7 @@ AC_PrecLand_StateMachine::FailSafeAction AC_PrecLand_StateMachine::get_failsafe_
         // start the timer
         failsafe_start_ms = AP_HAL::millis();
         failsafe_initialized = true;
-        gcs().send_text(MAV_SEVERITY_INFO, "PrecLand: Failsafe Measures");
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PrecLand: Failsafe Measures");
     }
 
     // Depending on the strictness we will either land vertically, wait for some time and then land vertically, not land at all

@@ -21,23 +21,6 @@
 #include <stdio.h>
 #include "bouncebuffer.h"
 
-#if defined(STM32H7)
-// always use a bouncebuffer on H7, to ensure alignment and padding
-#define IS_DMA_SAFE(addr) false
-#elif defined(STM32F732xx)
-// always use bounce buffer on F732
-#define IS_DMA_SAFE(addr) false
-#elif defined(STM32F7)
-// on F76x we only consider first half of DTCM memory as DMA safe, 2nd half is used as fast memory for EKF
-// on F74x we only have 64k of DTCM
-#define IS_DMA_SAFE(addr) ((((uint32_t)(addr)) & ((0xFFFFFFFF & ~(64*1024U-1)) | 1U)) == 0x20000000)
-#elif defined(STM32F1)
-#define IS_DMA_SAFE(addr) true
-#else
-// this checks an address is in main memory and 16 bit aligned
-#define IS_DMA_SAFE(addr) ((((uint32_t)(addr)) & 0xF0000001) == 0x20000000)
-#endif
-
 // Enable when trying to check if you are not just listening yourself
 #define ENABLE_ECHO_SAFE 0
 
@@ -64,8 +47,11 @@ void bouncebuffer_init(struct bouncebuffer_t **bouncebuffer, uint32_t prealloc_b
  */
 bool bouncebuffer_setup_read(struct bouncebuffer_t *bouncebuffer, uint8_t **buf, uint32_t size)
 {
-    if (!bouncebuffer || IS_DMA_SAFE(*buf)) {
-        // nothing needs to be done
+    if (!bouncebuffer || mem_is_dma_safe(*buf, size, bouncebuffer->on_axi_sram)) {
+#if defined(STM32H7)
+        // invalidate buffer so we know state in bouncebuffer_finish_read
+        stm32_cacheBufferInvalidate(*buf, (size+31)&~31);
+#endif
         return true;
     }
     osalDbgAssert((bouncebuffer->busy == false), "bouncebuffer read");        
@@ -87,6 +73,7 @@ bool bouncebuffer_setup_read(struct bouncebuffer_t *bouncebuffer, uint8_t **buf,
 #endif
 #if defined(STM32H7)
     osalDbgAssert((((uint32_t)*buf)&31) == 0, "bouncebuffer read align");
+    // invalidate buffer so we know state in bouncebuffer_finish_read
     stm32_cacheBufferInvalidate(*buf, (size+31)&~31);
 #endif
     bouncebuffer->busy = true;
@@ -98,6 +85,18 @@ bool bouncebuffer_setup_read(struct bouncebuffer_t *bouncebuffer, uint8_t **buf,
  */
 void bouncebuffer_finish_read(struct bouncebuffer_t *bouncebuffer, const uint8_t *buf, uint32_t size)
 {
+#if defined(STM32H7)
+    // clean+invalidate buffer after DMA transfer to it completed. invalidation
+    // is mandatory as prefetch etc. could have re-cached it before completion.
+    // clean is necessary as a bouncebuffer is sometimes used for non-DMA reads
+    // and if we didn't clean first we would lose CPU-written data. there is no
+    // risk of writing pre-DMA data as we invalidated any cached data before
+    // starting, so it can only be dirty if the CPU dirtied it storing reads to
+    // the bouncebuffer. in this case invalidation is unnecessary as no DMA
+    // occurred, but we can't know which we need to do here, so we do both.
+    stm32_cacheBufferFlush(buf, (size+31)&~31);
+#endif
+
     if (bouncebuffer && buf == bouncebuffer->dma_buf) {
         osalDbgAssert((bouncebuffer->busy == true), "bouncebuffer finish_read");
         if (bouncebuffer->orig_buf) {
@@ -113,8 +112,13 @@ void bouncebuffer_finish_read(struct bouncebuffer_t *bouncebuffer, const uint8_t
  */
 bool bouncebuffer_setup_write(struct bouncebuffer_t *bouncebuffer, const uint8_t **buf, uint32_t size)
 {
-    if (!bouncebuffer || IS_DMA_SAFE(*buf)) {
-        // nothing needs to be done
+    if (!bouncebuffer || mem_is_dma_safe(*buf, size, bouncebuffer->on_axi_sram)) {
+#if defined(STM32H7)
+        /*
+          on H7 we need to flush any pending writes to memory before the DMA operation
+         */
+        stm32_cacheBufferFlush(*buf, (size+31)&~31);
+#endif
         return true;
     }
     osalDbgAssert((bouncebuffer->busy == false), "bouncebuffer write");        
